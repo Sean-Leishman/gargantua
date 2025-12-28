@@ -1,0 +1,12 @@
+[package]
+name = "relavistic-renderer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nalgebra = "0.34.1"
+serde = "1.0.228"
+
+# Internal crates
+gr-core = { path = "crates/gr-core" }
+gr-tracer = { path = "crates/gr-tracer" }

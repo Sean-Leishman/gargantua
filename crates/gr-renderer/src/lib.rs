@@ -28,7 +28,8 @@ pub fn shade_outcome_linear(outcome: &RayOutcome) -> [f64; 3] {
         RayOutcome::Horizon => [0.0, 0.0, 0.0],
         RayOutcome::Escaped { final_direction } => sky_color(final_direction),
         RayOutcome::Disk { intensity, .. } => disk_color(*intensity),
-        RayOutcome::MaxSteps => [1.0, 0.0, 1.0],
+        // Photon still in flight at step cap — treat as deep sky (no direction available).
+        RayOutcome::MaxSteps => [0.0, 0.0, 10.0 / 255.0],
     }
 }
 

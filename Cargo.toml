@@ -9,7 +9,6 @@ resolver = "2"
 members = [
     "crates/gr-core",
     "crates/gr-renderer",
-    "crates/gr-tracer",
     "crates/raytracer",
 ]
 
@@ -35,5 +34,4 @@ indicatif = { version = "0.17", features = ["rayon"] }
 
 # Internal crates
 gr-core = { path = "crates/gr-core" }
-gr-tracer = { path = "crates/gr-tracer" }
 gr-renderer = { path = "crates/gr-renderer" }

@@ -594,18 +594,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gr-tracer"
-version = "0.1.0"
-dependencies = [
- "gr-core",
- "nalgebra",
- "num-complex",
- "num-traits",
- "rand 0.8.5",
- "rayon",
-]
-
-[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

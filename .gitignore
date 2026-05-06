@@ -1,1 +1,6 @@
 **/target
+*.png
+*.ppm
+*.jpg
+*.jpeg
+!docs/**/*.png

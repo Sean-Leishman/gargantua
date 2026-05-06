@@ -2,6 +2,8 @@ pub mod accel;
 pub mod bdpt;
 pub mod camera;
 pub mod core;
+#[cfg(feature = "curved")]
+pub mod curved;
 pub mod flat;
 pub mod material;
 pub mod output;

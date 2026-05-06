@@ -1209,6 +1209,9 @@ name = "raytracer"
 version = "0.1.0"
 dependencies = [
  "approx",
+ "gr-core",
+ "image",
+ "indicatif",
  "nalgebra",
  "rand 0.8.5",
  "rayon",

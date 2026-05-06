@@ -10,6 +10,7 @@ description = "Ray tracing library for flat and curved spacetime"
 [features]
 default = ["flat"]
 flat = []
+curved = ["dep:gr-core", "dep:image", "dep:indicatif"]
 
 [dependencies]
 nalgebra.workspace = true
@@ -17,6 +18,9 @@ rayon.workspace = true
 rand.workspace = true
 # Portable SIMD wrapper — used in the hot AABB intersection path.
 wide = "0.7"
+gr-core = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+indicatif = { workspace = true, optional = true }
 
 [dev-dependencies]
 approx = "0.5"

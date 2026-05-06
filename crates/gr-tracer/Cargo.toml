@@ -13,3 +13,4 @@ num-traits.workspace = true
 num-complex.workspace = true
 rayon.workspace = true
 rand.workspace = true
+gr-core.workspace = true

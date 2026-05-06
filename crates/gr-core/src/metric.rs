@@ -39,6 +39,33 @@ pub trait Metric: Send + Sync {
             false
         }
     }
+
+    /// 4-velocity of a prograde circular Keplerian orbit in the equatorial plane.
+    ///
+    /// Returned in coordinate basis (u^t, 0, 0, u^φ); used by the disk renderer
+    /// to compute Doppler boost on emitted light. Returns `None` if the metric
+    /// has no sensible circular-orbit definition or the orbit is unphysical at
+    /// `pos[1]` (e.g. inside the photon sphere).
+    fn orbital_four_velocity(&self, _pos: &SpacetimePoint) -> Option<FourVelocity> {
+        None
+    }
+}
+
+/// Build a circular-orbit 4-velocity from an angular velocity Ω, normalising
+/// against the metric so that u·u = -1. Returns None if the orbit is spacelike
+/// (denominator non-positive — i.e. inside the photon sphere or extreme spin).
+pub fn circular_orbit_velocity<M: Metric + ?Sized>(
+    metric: &M,
+    pos: &SpacetimePoint,
+    omega: f64,
+) -> Option<FourVelocity> {
+    let g = metric.metric_tensor(pos);
+    let denom = -(g[(0, 0)] + 2.0 * g[(0, 3)] * omega + g[(3, 3)] * omega * omega);
+    if denom <= 0.0 || !denom.is_finite() {
+        return None;
+    }
+    let u_t = 1.0 / denom.sqrt();
+    Some(FourVelocity::new(u_t, 0.0, 0.0, omega * u_t))
 }
 
 /// Compute Christoffel symbols numerically via finite differences

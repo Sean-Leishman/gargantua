@@ -9,7 +9,10 @@ description = ""
 
 [dependencies]
 nalgebra.workspace = true
-num-traits.workspace = true
-num-complex.workspace = true
 rayon.workspace = true
-thiserror.workspace = true
+image.workspace = true
+clap.workspace = true
+indicatif.workspace = true
+gr-core.workspace = true
+gr-tracer.workspace = true
+

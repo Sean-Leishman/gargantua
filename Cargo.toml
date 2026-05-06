@@ -28,8 +28,11 @@ serde = "1.0.228"
 rayon = "1.10"
 thiserror = "2"
 rand = "0.8"
+image = "0.25"
+clap = { version = "4.5", features = ["derive"] }
+indicatif = { version = "0.17", features = ["rayon"] }
 
 # Internal crates
 gr-core = { path = "crates/gr-core" }
 gr-tracer = { path = "crates/gr-tracer" }
-render = { path = "crates/render" }
+gr-renderer = { path = "crates/gr-renderer" }

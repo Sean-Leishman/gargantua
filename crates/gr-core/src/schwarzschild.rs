@@ -1,4 +1,7 @@
-use crate::metric::{ChristoffelSymbols, Metric, MetricTensor, SpacetimePoint};
+use crate::metric::{
+    ChristoffelSymbols, FourVelocity, Metric, MetricTensor, SpacetimePoint,
+    circular_orbit_velocity,
+};
 use nalgebra::Vector4;
 
 pub struct Schwarzschild {
@@ -88,12 +91,39 @@ impl Metric for Schwarzschild {
     fn event_horizon(&self) -> Option<f64> {
         Some(self.rs)
     }
+
+    fn orbital_four_velocity(&self, pos: &SpacetimePoint) -> Option<FourVelocity> {
+        let r = pos[1];
+        if r <= 3.0 * self.mass {
+            return None; // inside photon sphere — no timelike circular orbit
+        }
+        let omega = (self.mass / (r * r * r)).sqrt();
+        circular_orbit_velocity(self, pos, omega)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::f64::consts::PI;
+
+    #[test]
+    fn test_keplerian_orbit_is_normalized_timelike() {
+        let metric = Schwarzschild::new(1.0);
+        let pos = SpacetimePoint::new(0.0, 10.0, PI / 2.0, 0.0);
+        let u = metric.orbital_four_velocity(&pos).expect("r=10M is outside photon sphere");
+        let g = metric.metric_tensor(&pos);
+        let norm = (g * u).dot(&u);
+        assert!((norm + 1.0).abs() < 1e-9, "u·u = {norm}, expected -1");
+        assert!(u[3] > 0.0, "prograde orbit should have u^φ > 0");
+    }
+
+    #[test]
+    fn test_no_circular_orbit_inside_photon_sphere() {
+        let metric = Schwarzschild::new(1.0);
+        let pos = SpacetimePoint::new(0.0, 2.5, PI / 2.0, 0.0);
+        assert!(metric.orbital_four_velocity(&pos).is_none());
+    }
 
     #[test]
     fn test_schwarzschild_flat_at_infinity() {

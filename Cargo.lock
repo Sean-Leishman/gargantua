@@ -1205,6 +1205,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "raytracer"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "nalgebra",
+ "rand 0.8.5",
+ "rayon",
+ "wide",
+]
+
+[[package]]
 name = "relavistic-renderer"
 version = "0.1.0"
 

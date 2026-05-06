@@ -1,0 +1,22 @@
+[package]
+name = "raytracer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Ray tracing library for flat and curved spacetime"
+
+[features]
+default = ["flat"]
+flat = []
+
+[dependencies]
+nalgebra.workspace = true
+rayon.workspace = true
+rand.workspace = true
+# Portable SIMD wrapper — used in the hot AABB intersection path.
+wide = "0.7"
+
+[dev-dependencies]
+approx = "0.5"

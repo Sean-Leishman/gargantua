@@ -588,11 +588,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "gr-core",
- "gr-tracer",
  "image",
- "indicatif",
  "nalgebra",
- "rayon",
+ "raytracer",
 ]
 
 [[package]]

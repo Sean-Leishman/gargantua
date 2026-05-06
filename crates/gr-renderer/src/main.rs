@@ -1,9 +1,10 @@
 use clap::Parser;
 use gr_core::{Kerr, Metric, Schwarzschild};
-use gr_renderer::{RenderOptions, render, render_with_disk};
-use gr_tracer::{AccretionDisk, Camera};
 use image::RgbImage;
 use nalgebra::{Vector3, Vector4};
+use raytracer::curved::{
+    AccretionDisk, Camera, RenderOptions, render, render_with_disk,
+};
 use std::f64::consts::PI;
 use std::time::Instant;
 

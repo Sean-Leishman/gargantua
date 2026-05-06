@@ -1,7 +1,6 @@
 use gr_core::Schwarzschild;
-use gr_renderer::{RenderOptions, render};
-use gr_tracer::Camera;
 use nalgebra::{Vector3, Vector4};
+use raytracer::curved::{Camera, RenderOptions, render};
 use std::f64::consts::PI;
 
 fn default_camera(width: u32, height: u32) -> Camera {

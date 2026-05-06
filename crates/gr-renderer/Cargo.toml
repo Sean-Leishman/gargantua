@@ -9,10 +9,7 @@ description = ""
 
 [dependencies]
 nalgebra.workspace = true
-rayon.workspace = true
 image.workspace = true
 clap.workspace = true
-indicatif.workspace = true
 gr-core.workspace = true
-gr-tracer.workspace = true
-
+raytracer = { path = "../raytracer", features = ["curved"] }

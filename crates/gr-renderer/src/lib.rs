@@ -42,7 +42,8 @@ fn sky_color(dir: &Vector3<f64>) -> [f64; 3] {
         let b = (180 + (h % 75) as u32) as f64 / 255.0;
         [b, b, b]
     } else {
-        let v = dir[1].abs() * 15.0 / 255.0;
+        // Camera "up" is +z, so use the z-component for the horizon→zenith gradient.
+        let v = dir[2].abs() * 15.0 / 255.0;
         [0.0, 0.0, 10.0 / 255.0 + v]
     }
 }

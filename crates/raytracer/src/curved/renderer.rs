@@ -1,8 +1,9 @@
+use crate::core::Hittable;
 use crate::curved::camera::Camera;
 use crate::curved::disk::AccretionDisk;
 use crate::curved::outcome::RayOutcome;
 use crate::curved::ray::GeodesicRay;
-use crate::curved::tracer::{trace_ray, trace_ray_with_disk};
+use crate::curved::tracer::{trace_ray, trace_ray_with_disk, trace_ray_with_scene};
 use gr_core::{Metric, RK45Integrator};
 use image::{Rgb, RgbImage};
 use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
@@ -32,6 +33,7 @@ pub fn shade_outcome_linear(outcome: &RayOutcome) -> [f64; 3] {
         RayOutcome::Horizon => [0.0, 0.0, 0.0],
         RayOutcome::Escaped { final_direction } => sky_color(final_direction),
         RayOutcome::Disk { intensity, .. } => disk_color(*intensity),
+        RayOutcome::Scene { color } => *color,
         // Photon still in flight at step cap — treat as deep sky (no direction available).
         RayOutcome::MaxSteps => [0.0, 0.0, 10.0 / 255.0],
     }
@@ -92,6 +94,82 @@ pub fn render_with_disk<M: Metric + Sync>(
     opts: RenderOptions,
 ) -> RgbImage {
     render_inner(metric, camera, Some(disk), width, height, opts)
+}
+
+/// Render a curved-space scene where geodesics test against arbitrary
+/// `Hittable` objects (a Cornell box, glass spheres, anything from the
+/// flat-space `shape` module). The path through the metric is integrated
+/// with RK45; between steps the chord is tested against the scene's BVH.
+///
+/// Disk + scene aren't currently composable in a single render — pick
+/// one. (They could be combined later by extending `RayOutcome::Scene`
+/// with accumulated disk intensity.)
+pub fn render_with_scene<M: Metric + Sync, S: Hittable + Sync>(
+    metric: &M,
+    camera: &Camera,
+    scene: &S,
+    width: u32,
+    height: u32,
+    opts: RenderOptions,
+) -> RgbImage {
+    let integrator = RK45Integrator { max_radius: 200.0, ..RK45Integrator::default() };
+    let max_steps = 5000;
+    let spa = opts.samples_per_axis.max(1);
+    let sub_w = width * spa;
+    let sub_h = height * spa;
+    let inv_spp = 1.0 / (spa * spa) as f64;
+
+    let progress = if opts.show_progress {
+        let pb = ProgressBar::new(height as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner} rows {pos}/{len} [{elapsed_precise}] [{wide_bar}] eta {eta}",
+            )
+            .unwrap(),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
+    let row_iter = (0..height).into_par_iter();
+    let render_one_row = |py: u32| -> Vec<Rgb<u8>> {
+        (0..width)
+            .map(|px| {
+                let mut acc = [0.0_f64; 3];
+                for sy in 0..spa {
+                    for sx in 0..spa {
+                        let sub_px = px * spa + sx;
+                        let sub_py = py * spa + sy;
+                        let mut ray =
+                            GeodesicRay::from_camera(metric, camera, sub_px, sub_py, sub_w, sub_h);
+                        let outcome =
+                            trace_ray_with_scene(metric, &mut ray, scene, &integrator, max_steps);
+                        let lin = shade_outcome_linear(&outcome);
+                        acc[0] += lin[0];
+                        acc[1] += lin[1];
+                        acc[2] += lin[2];
+                    }
+                }
+                encode_srgb([acc[0] * inv_spp, acc[1] * inv_spp, acc[2] * inv_spp])
+            })
+            .collect()
+    };
+
+    let rows: Vec<Vec<Rgb<u8>>> = if let Some(pb) = progress.as_ref() {
+        row_iter.progress_with(pb.clone()).map(render_one_row).collect()
+    } else {
+        row_iter.map(render_one_row).collect()
+    };
+    if let Some(pb) = progress { pb.finish_and_clear(); }
+
+    let mut img = RgbImage::new(width, height);
+    for (py, row) in rows.into_iter().enumerate() {
+        for (px, color) in row.into_iter().enumerate() {
+            img.put_pixel(px as u32, py as u32, color);
+        }
+    }
+    img
 }
 
 fn render_inner<M: Metric + Sync>(
@@ -182,3 +260,51 @@ fn render_row<M: Metric + Sync>(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Color;
+    use crate::material::Lambertian;
+    use crate::scene::World;
+    use crate::shape::Sphere;
+    use gr_core::{Schwarzschild, SpacetimePoint};
+
+    #[test]
+    fn render_with_scene_produces_some_object_pixels() {
+        // A bright Lambertian sphere in front of the camera, well outside
+        // the horizon. With a large radius it should occupy most of the
+        // frame and most rays should land on it (RayOutcome::Scene), not
+        // escape (sky) or fall into the horizon.
+        let mat = Lambertian::new(Color::new(0.9, 0.1, 0.1));
+        let sphere = Sphere::new(crate::core::point3(20.0, 0.0, 0.0), 8.0, mat);
+        let world = World::new().add(sphere);
+        let bvh = world.build_bvh();
+
+        let metric = Schwarzschild::new(1.0);
+        // Camera at r = 50, on the equatorial plane (theta = pi/2), phi = pi
+        // so it looks toward the sphere placed at (+x, 0, 0) in cartesian.
+        let camera = Camera {
+            position: SpacetimePoint::new(0.0, 50.0, std::f64::consts::FRAC_PI_2, std::f64::consts::PI),
+            look_at: Vector3::new(1.0, 0.0, 0.0),
+            up: Vector3::new(0.0, 0.0, 1.0),
+            fov_y_radians: 0.6,
+            aspect: 1.0,
+        };
+
+        let img = render_with_scene(&metric, &camera, &bvh, 16, 16, RenderOptions::default());
+
+        let mut red_pixels = 0;
+        for px in img.pixels() {
+            // The Lambertian albedo is (0.9, 0.1, 0.1) → after facing-ratio +
+            // sRGB encode, red dominates green/blue significantly.
+            let r = px.0[0] as i32;
+            let g = px.0[1] as i32;
+            if r > 50 && r > g + 20 {
+                red_pixels += 1;
+            }
+        }
+        assert!(red_pixels > 5, "expected curved renderer to hit the sphere on at least a few pixels (got {})", red_pixels);
+    }
+}
+

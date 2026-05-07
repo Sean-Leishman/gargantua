@@ -1,8 +1,21 @@
+use crate::core::{Color, Hittable, Interval, Point3, Ray};
 use crate::curved::disk::AccretionDisk;
 use crate::curved::outcome::RayOutcome;
 use crate::curved::ray::GeodesicRay;
 use gr_core::{Metric, RK45Integrator, SpacetimePoint, StepResult};
 use nalgebra::Vector3;
+
+/// Spherical `(t, r, θ, φ)` (the GR coordinate convention) → cartesian
+/// `Point3`. Drops the time component — the scene lives in a single
+/// spatial slice.
+#[inline]
+fn spherical_to_cartesian(p: &SpacetimePoint) -> Point3 {
+    let r = p[1];
+    let theta = p[2];
+    let phi = p[3];
+    let st = theta.sin();
+    Point3::new(r * st * phi.cos(), r * st * phi.sin(), r * theta.cos())
+}
 
 pub fn trace_ray<M: Metric>(
     metric: &M,
@@ -140,3 +153,79 @@ fn spatial_dir(v: &nalgebra::Vector4<f64>) -> Vector3<f64> {
     let n = s.norm();
     if n > 0.0 { s / n } else { Vector3::new(1.0, 0.0, 0.0) }
 }
+
+/// Trace a null geodesic against an arbitrary `Hittable` scene living in
+/// the cartesian spatial slice.
+///
+/// Between consecutive integrator steps the photon's path is approximated
+/// by a straight chord in cartesian space, and we test that chord against
+/// the scene's BVH. This is exact in flat space and a good local
+/// approximation when the integrator step is small relative to the scene
+/// curvature scale — the user can tighten `max_steps` or the integrator's
+/// tolerance if they need finer chords near a horizon.
+///
+/// Shading is intentionally cheap: the material's `scatter` is sampled
+/// once for an albedo, the `emitted` term is added, and the result is
+/// modulated by a `0.5 + 0.5·(N·-D)` facing-ratio so flat-shaded objects
+/// read clearly. This is *not* a recursive path trace — caustics, GI,
+/// and shadows aren't computed. The point is geometry through a curved
+/// metric.
+pub fn trace_ray_with_scene<M: Metric, S: Hittable>(
+    metric: &M,
+    ray: &mut GeodesicRay,
+    scene: &S,
+    integrator: &RK45Integrator,
+    max_steps: usize,
+) -> RayOutcome {
+    let mut h = integrator.initial_step;
+
+    for _ in 0..max_steps {
+        let pos_before = ray.state.position;
+        let result = integrator.step(metric, &mut ray.state, &mut h);
+        let pos_after = ray.state.position;
+
+        // Test the chord [cart_before, cart_after] against the scene.
+        let cart_before = spherical_to_cartesian(&pos_before);
+        let cart_after = spherical_to_cartesian(&pos_after);
+        let segment = cart_after - cart_before;
+        let length = segment.norm();
+        if length > 0.0 {
+            // Direction is non-unit; t in `Hittable::hit` is in segment-length
+            // units, so the valid range is [0, 1] for "anywhere on the chord".
+            let chord = Ray::new(cart_before, segment);
+            if let Some(hit) = scene.hit(&chord, Interval::new(0.0, 1.0)) {
+                return RayOutcome::Scene { color: shade_hit(&chord, &hit) };
+            }
+        }
+
+        match result {
+            StepResult::Horizon | StepResult::Singular => return RayOutcome::Horizon,
+            StepResult::Escaped => {
+                return RayOutcome::Escaped { final_direction: spatial_dir(&ray.state.velocity) };
+            }
+            StepResult::Continue => {}
+        }
+    }
+    RayOutcome::MaxSteps
+}
+
+/// One-bounce-free shading: pull the material's albedo via `scatter` (or
+/// fall back to its emission), then multiply by a facing ratio so curved
+/// surfaces read.
+fn shade_hit(ray: &Ray, hit: &crate::core::HitRecord) -> [f64; 3] {
+    let albedo = match hit
+        .material
+        .scatter(ray, hit.point, hit.normal, hit.front_face)
+    {
+        Some((c, _)) => c,
+        None => Color::BLACK,
+    };
+    let emission = hit.material.emitted(hit.uv.0, hit.uv.1, hit.point);
+
+    // -ray.dir·normal, clamped — the standard "facing the camera" term.
+    let nd = (-ray.direction.normalize()).dot(&hit.normal).max(0.0);
+    let facing = 0.5 + 0.5 * nd;
+    let lit = albedo * facing + emission;
+    [lit.r, lit.g, lit.b]
+}
+

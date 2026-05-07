@@ -133,8 +133,6 @@ fn main() {
     let elapsed = start.elapsed();
     println!("Rendered in {:.2?}", elapsed);
 
-    // Save
-    image.save_ppm("cornell_box.ppm").unwrap();
-    println!("Saved to cornell_box.ppm");
-    println!("\nConvert to PNG with: convert cornell_box.ppm cornell_box.png");
+    image.save_png("cornell_box.png").unwrap();
+    println!("Saved to cornell_box.png");
 }

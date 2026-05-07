@@ -61,6 +61,17 @@ impl ImageBuffer {
         buffer
     }
 
+    /// Save as PNG (or any format inferred from the file extension by the `image` crate).
+    pub fn save_png(&self, path: &str) -> image::ImageResult<()> {
+        let mut buf = image::RgbImage::new(self.width, self.height);
+        for y in 0..self.height as usize {
+            for x in 0..self.width as usize {
+                buf.put_pixel(x as u32, y as u32, image::Rgb(self.get_pixel(x, y)));
+            }
+        }
+        buf.save(path)
+    }
+
     /// Save as PPM (no external dependencies)
     pub fn save_ppm(&self, path: &str) -> std::io::Result<()> {
         use std::io::Write;

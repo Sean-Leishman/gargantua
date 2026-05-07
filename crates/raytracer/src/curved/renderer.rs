@@ -3,7 +3,9 @@ use crate::curved::camera::Camera;
 use crate::curved::disk::AccretionDisk;
 use crate::curved::outcome::RayOutcome;
 use crate::curved::ray::GeodesicRay;
-use crate::curved::tracer::{trace_ray, trace_ray_with_disk, trace_ray_with_scene};
+use crate::curved::tracer::{
+    trace_ray, trace_ray_with_disk, trace_ray_with_disk_and_scene, trace_ray_with_scene,
+};
 use gr_core::{Metric, RK45Integrator};
 use image::{Rgb, RgbImage};
 use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
@@ -101,9 +103,8 @@ pub fn render_with_disk<M: Metric + Sync>(
 /// flat-space `shape` module). The path through the metric is integrated
 /// with RK45; between steps the chord is tested against the scene's BVH.
 ///
-/// Disk + scene aren't currently composable in a single render — pick
-/// one. (They could be combined later by extending `RayOutcome::Scene`
-/// with accumulated disk intensity.)
+/// To combine the scene with a volumetric accretion disk, use
+/// `render_with_disk_and_scene` instead.
 pub fn render_with_scene<M: Metric + Sync, S: Hittable + Sync>(
     metric: &M,
     camera: &Camera,
@@ -145,6 +146,80 @@ pub fn render_with_scene<M: Metric + Sync, S: Hittable + Sync>(
                             GeodesicRay::from_camera(metric, camera, sub_px, sub_py, sub_w, sub_h);
                         let outcome =
                             trace_ray_with_scene(metric, &mut ray, scene, &integrator, max_steps);
+                        let lin = shade_outcome_linear(&outcome);
+                        acc[0] += lin[0];
+                        acc[1] += lin[1];
+                        acc[2] += lin[2];
+                    }
+                }
+                encode_srgb([acc[0] * inv_spp, acc[1] * inv_spp, acc[2] * inv_spp])
+            })
+            .collect()
+    };
+
+    let rows: Vec<Vec<Rgb<u8>>> = if let Some(pb) = progress.as_ref() {
+        row_iter.progress_with(pb.clone()).map(render_one_row).collect()
+    } else {
+        row_iter.map(render_one_row).collect()
+    };
+    if let Some(pb) = progress { pb.finish_and_clear(); }
+
+    let mut img = RgbImage::new(width, height);
+    for (py, row) in rows.into_iter().enumerate() {
+        for (px, color) in row.into_iter().enumerate() {
+            img.put_pixel(px as u32, py as u32, color);
+        }
+    }
+    img
+}
+
+/// Render a curved-space scene composed of *both* a volumetric accretion
+/// disk and `Hittable` geometry. See `trace_ray_with_disk_and_scene` for
+/// the per-step composition.
+pub fn render_with_disk_and_scene<M: Metric + Sync, S: Hittable + Sync>(
+    metric: &M,
+    camera: &Camera,
+    disk: &AccretionDisk,
+    scene: &S,
+    width: u32,
+    height: u32,
+    opts: RenderOptions,
+) -> RgbImage {
+    let integrator = RK45Integrator { max_radius: 200.0, ..RK45Integrator::default() };
+    let max_steps = 5000;
+    let observer = camera.position;
+    let spa = opts.samples_per_axis.max(1);
+    let sub_w = width * spa;
+    let sub_h = height * spa;
+    let inv_spp = 1.0 / (spa * spa) as f64;
+
+    let progress = if opts.show_progress {
+        let pb = ProgressBar::new(height as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner} rows {pos}/{len} [{elapsed_precise}] [{wide_bar}] eta {eta}",
+            )
+            .unwrap(),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
+    let row_iter = (0..height).into_par_iter();
+    let render_one_row = |py: u32| -> Vec<Rgb<u8>> {
+        (0..width)
+            .map(|px| {
+                let mut acc = [0.0_f64; 3];
+                for sy in 0..spa {
+                    for sx in 0..spa {
+                        let sub_px = px * spa + sx;
+                        let sub_py = py * spa + sy;
+                        let mut ray =
+                            GeodesicRay::from_camera(metric, camera, sub_px, sub_py, sub_w, sub_h);
+                        let outcome = trace_ray_with_disk_and_scene(
+                            metric, &mut ray, disk, scene, &observer, &integrator, max_steps,
+                        );
                         let lin = shade_outcome_linear(&outcome);
                         acc[0] += lin[0];
                         acc[1] += lin[1];

@@ -209,6 +209,116 @@ pub fn trace_ray_with_scene<M: Metric, S: Hittable>(
     RayOutcome::MaxSteps
 }
 
+/// Compose a curved-spacetime path through *both* a volumetric disk and
+/// a `Hittable` scene.
+///
+/// Per integrator step we (1) test the chord against the scene first; on
+/// hit, return `Scene { color }` with the disk emission accumulated *up
+/// to* the hit baked in (`color = scene_shaded · transmission +
+/// disk_color(intensity)`). Then (2) accumulate the segment's disk
+/// contribution as in `trace_ray_with_disk`.
+///
+/// The "scene first" ordering means we slightly under-count disk
+/// emission within the same step as a scene hit (by ≤ one step's
+/// dlambda × emission). For the integrator's step sizes that's well
+/// below the noise floor.
+pub fn trace_ray_with_disk_and_scene<M: Metric, S: Hittable>(
+    metric: &M,
+    ray: &mut GeodesicRay,
+    disk: &AccretionDisk,
+    scene: &S,
+    observer: &SpacetimePoint,
+    integrator: &RK45Integrator,
+    max_steps: usize,
+) -> RayOutcome {
+    let mut h = integrator.initial_step;
+    let mut intensity = 0.0_f64;
+    let mut transmission = 1.0_f64;
+    let absorption_coeff = 0.1_f64;
+
+    let g_tt_obs = -metric.metric_tensor(observer)[(0, 0)];
+    let sqrt_neg_gtt_obs = g_tt_obs.max(0.0).sqrt();
+
+    for _ in 0..max_steps {
+        let pos_before = ray.state.position;
+        let vel_before = ray.state.velocity;
+        let lambda_before = ray.state.lambda;
+        let result = integrator.step(metric, &mut ray.state, &mut h);
+        let dlambda = (ray.state.lambda - lambda_before).max(0.0);
+
+        // 1. Scene chord test — if we hit, compose the scene color with
+        //    the disk emission already accumulated *in front of* it.
+        let cart_before = spherical_to_cartesian(&pos_before);
+        let cart_after = spherical_to_cartesian(&ray.state.position);
+        let segment = cart_after - cart_before;
+        if segment.norm() > 0.0 {
+            let chord = Ray::new(cart_before, segment);
+            if let Some(hit) = scene.hit(&chord, Interval::new(0.0, 1.0)) {
+                let scene_lin = shade_hit(&chord, &hit);
+                let disk_lin = crate::curved::renderer::disk_color(intensity);
+                return RayOutcome::Scene {
+                    color: [
+                        scene_lin[0] * transmission + disk_lin[0],
+                        scene_lin[1] * transmission + disk_lin[1],
+                        scene_lin[2] * transmission + disk_lin[2],
+                    ],
+                };
+            }
+        }
+
+        // 2. Disk volume contribution along the segment (mirrors
+        //    `trace_ray_with_disk`).
+        if dlambda > 0.0 {
+            let mid = SpacetimePoint::new(
+                0.5 * (pos_before[0] + ray.state.position[0]),
+                0.5 * (pos_before[1] + ray.state.position[1]),
+                0.5 * (pos_before[2] + ray.state.position[2]),
+                0.5 * (pos_before[3] + ray.state.position[3]),
+            );
+            let rho = disk.density(&mid);
+            if rho > 0.0 {
+                let j = disk.emission(&mid);
+                let g_factor = redshift_factor(
+                    metric,
+                    &mid,
+                    &(0.5 * (vel_before + ray.state.velocity)),
+                    sqrt_neg_gtt_obs,
+                );
+                let redshifted = j * g_factor.powi(4);
+                intensity += redshifted * dlambda * transmission;
+                transmission *= (-rho * dlambda * absorption_coeff).exp();
+                if transmission < 1e-3 {
+                    return RayOutcome::Disk { intensity, color_temp: disk.temperature_0 };
+                }
+            }
+        }
+
+        match result {
+            StepResult::Horizon | StepResult::Singular => {
+                return if intensity > 0.0 {
+                    RayOutcome::Disk { intensity, color_temp: disk.temperature_0 }
+                } else {
+                    RayOutcome::Horizon
+                };
+            }
+            StepResult::Escaped => {
+                return if intensity > 0.0 {
+                    RayOutcome::Disk { intensity, color_temp: disk.temperature_0 }
+                } else {
+                    RayOutcome::Escaped { final_direction: spatial_dir(&ray.state.velocity) }
+                };
+            }
+            StepResult::Continue => {}
+        }
+    }
+
+    if intensity > 0.0 {
+        RayOutcome::Disk { intensity, color_temp: disk.temperature_0 }
+    } else {
+        RayOutcome::MaxSteps
+    }
+}
+
 /// One-bounce-free shading: pull the material's albedo via `scatter` (or
 /// fall back to its emission), then multiply by a facing ratio so curved
 /// surfaces read.

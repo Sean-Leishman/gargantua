@@ -20,8 +20,13 @@ pub struct Quad {
     normal: Vec3,
     /// D coefficient in plane equation Ax + By + Cz = D
     d: f64,
-    /// Precomputed for hit testing
-    w: Vec3,
+    /// Precomputed `v × w` (where `w = (u × v) / |u × v|²`). Lets the hit
+    /// path compute `alpha = planar · e_alpha` instead of `w · (planar × v)`
+    /// — one cross product saved per primary ray. Derivation:
+    /// `w · (a × b) = a · (b × w)` (cyclic scalar triple product).
+    e_alpha: Vec3,
+    /// Precomputed `w × u`. `beta = planar · e_beta` by the same identity.
+    e_beta: Vec3,
 }
 
 impl Quad {
@@ -34,6 +39,11 @@ impl Quad {
         let normal = n.normalize();
         let d = normal.dot(&q.coords);
         let w = n / n.dot(&n);
+        let e_alpha = v.cross(&w);
+        let e_beta = w.cross(&u);
+        // `w` itself is no longer needed past this point — it lives only
+        // inside `e_alpha`/`e_beta`.
+        let _ = w;
 
         // Compute bounding box from the four corners
         let p0 = q;
@@ -67,7 +77,8 @@ impl Quad {
             bbox,
             normal,
             d,
-            w,
+            e_alpha,
+            e_beta,
         }
     }
 }
@@ -91,9 +102,14 @@ impl Hittable for Quad {
         let intersection = ray.at(t);
         let planar_hitpt = intersection - self.q;
 
-        // Check if hit point is inside the quad using the local coordinate system
-        let alpha = self.w.dot(&planar_hitpt.cross(&self.v));
-        let beta = self.w.dot(&self.u.cross(&planar_hitpt));
+        // Check if the hit lies inside the parallelogram. The classic
+        // form is `alpha = w · (planar × v)`, but by the cyclic identity
+        // of the scalar triple product that equals `planar · (v × w)`.
+        // We precomputed `e_alpha = v × w` and `e_beta = w × u` at
+        // construction time, so the hot path is now two dots instead of
+        // two cross products + two dots.
+        let alpha = planar_hitpt.dot(&self.e_alpha);
+        let beta = planar_hitpt.dot(&self.e_beta);
 
         // Check bounds [0, 1] for both coordinates
         if alpha < 0.0 || alpha > 1.0 || beta < 0.0 || beta > 1.0 {

@@ -35,3 +35,6 @@ indicatif = { version = "0.17", features = ["rayon"] }
 # Internal crates
 gr-core = { path = "crates/gr-core" }
 gr-renderer = { path = "crates/gr-renderer" }
+
+[profile.release]
+debug = "line-tables-only"

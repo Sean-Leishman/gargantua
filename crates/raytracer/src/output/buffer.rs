@@ -1,3 +1,5 @@
+use rayon::prelude::*;
+
 use crate::core::Color;
 
 /// A simple image buffer that stores RGB pixels
@@ -48,46 +50,56 @@ impl ImageBuffer {
         self.set_pixel(x, y, color.to_rgb_gamma(2.2));
     }
 
-    /// Build image from parallel row iterator
+    /// Construct directly from a flat pixel buffer. `pixels.len()` must equal `width * height`.
+    pub fn from_pixels(width: u32, height: u32, pixels: Vec<[u8; 3]>) -> Self {
+        debug_assert_eq!(pixels.len(), (width * height) as usize);
+        Self { width, height, pixels }
+    }
+
+    pub(crate) fn pixels_mut(&mut self) -> &mut Vec<[u8; 3]> {
+        &mut self.pixels
+    }
+
+    /// Build image from per-row HDR colors via parallel gamma encode.
     pub fn from_rows(width: u32, height: u32, rows: Vec<Vec<Color>>) -> Self {
-        let mut buffer = Self::new(width, height);
-
-        for (y, row) in rows.into_iter().enumerate() {
-            for (x, color) in row.into_iter().enumerate() {
-                buffer.set_pixel_color(x, y, color);
-            }
-        }
-
-        buffer
+        let pixels: Vec<[u8; 3]> = rows
+            .into_par_iter()
+            .flat_map_iter(|row| row.into_iter().map(|c| c.to_rgb_gamma(2.2)))
+            .collect();
+        Self::from_pixels(width, height, pixels)
     }
 
     /// Save as PNG (or any format inferred from the file extension by the `image` crate).
     pub fn save_png(&self, path: &str) -> image::ImageResult<()> {
-        let mut buf = image::RgbImage::new(self.width, self.height);
-        for y in 0..self.height as usize {
-            for x in 0..self.width as usize {
-                buf.put_pixel(x as u32, y as u32, image::Rgb(self.get_pixel(x, y)));
-            }
+        // Flatten our [u8;3] vec into the contiguous Vec<u8> the `image` crate
+        // wants. `from_raw` is O(1) when the buffer is already the right size,
+        // so this avoids the per-pixel `put_pixel` call we used to do.
+        let mut raw: Vec<u8> = Vec::with_capacity(self.pixels.len() * 3);
+        for px in &self.pixels {
+            raw.extend_from_slice(px);
         }
+        let buf = image::RgbImage::from_raw(self.width, self.height, raw)
+            .expect("pixel buffer size mismatch");
         buf.save(path)
     }
 
     /// Save as PPM (no external dependencies)
     pub fn save_ppm(&self, path: &str) -> std::io::Result<()> {
-        use std::io::Write;
-        let mut file = std::fs::File::create(path)?;
+        use std::io::{BufWriter, Write};
+        let file = std::fs::File::create(path)?;
+        let mut w = BufWriter::new(file);
 
-        writeln!(file, "P3")?;
-        writeln!(file, "{} {}", self.width, self.height)?;
-        writeln!(file, "255")?;
+        writeln!(w, "P3")?;
+        writeln!(w, "{} {}", self.width, self.height)?;
+        writeln!(w, "255")?;
 
         for y in 0..self.height as usize {
             for x in 0..self.width as usize {
                 let [r, g, b] = self.get_pixel(x, y);
-                writeln!(file, "{} {} {}", r, g, b)?;
+                writeln!(w, "{} {} {}", r, g, b)?;
             }
         }
 
-        Ok(())
+        w.flush()
     }
 }

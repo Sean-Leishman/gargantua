@@ -1,3 +1,5 @@
+use rayon::prelude::*;
+
 use crate::core::Color;
 
 /// HDR image buffer for post-processing
@@ -36,15 +38,12 @@ impl HdrBuffer {
         self.pixels[idx]
     }
 
-    /// Build from parallel row iterator
+    /// Build from parallel row iterator. Flattens row Vecs into the
+    /// internal flat buffer in parallel (avoids per-pixel index math).
     pub fn from_rows(width: u32, height: u32, rows: Vec<Vec<Color>>) -> Self {
-        let mut buffer = Self::new(width, height);
-        for (y, row) in rows.into_iter().enumerate() {
-            for (x, color) in row.into_iter().enumerate() {
-                buffer.set_pixel(x, y, color);
-            }
-        }
-        buffer
+        let pixels: Vec<Color> = rows.into_par_iter().flatten().collect();
+        debug_assert_eq!(pixels.len(), (width * height) as usize);
+        Self { width, height, pixels }
     }
 
     /// Apply bloom effect
@@ -61,15 +60,16 @@ impl HdrBuffer {
         let blurred = Self::blur(&bright, self.width, self.height, radius);
 
         // Add blurred bright pixels back to original
-        for i in 0..self.pixels.len() {
-            self.pixels[i] = self.pixels[i] + blurred[i] * intensity;
-        }
+        self.pixels
+            .par_iter_mut()
+            .zip(blurred.par_iter())
+            .for_each(|(p, b)| *p = *p + *b * intensity);
     }
 
     /// Extract pixels above brightness threshold
     fn extract_bright(&self, threshold: f64) -> Vec<Color> {
         self.pixels
-            .iter()
+            .par_iter()
             .map(|c| {
                 let brightness = c.luminance();
                 if brightness > threshold {
@@ -103,97 +103,137 @@ impl HdrBuffer {
         let ksum: f64 = kernel.iter().sum();
         for k in &mut kernel { *k /= ksum; }
 
+        // Horizontal pass — clamp x. Each output row depends only on its
+        // own input row, so rows are independent and we parallelize them.
         let mut temp = vec![Color::BLACK; pixels.len()];
-        // Horizontal pass — clamp x.
-        for y in 0..h {
-            let row = (y * w) as usize;
-            for x in 0..w {
-                let mut sum = Color::BLACK;
-                for (i, &k) in kernel.iter().enumerate() {
-                    let dx = i as i32 - r;
-                    let nx = (x + dx).clamp(0, w - 1);
-                    sum = sum + pixels[row + nx as usize] * k;
+        let row_stride = w as usize;
+        temp.par_chunks_mut(row_stride)
+            .enumerate()
+            .for_each(|(y, out_row)| {
+                let in_row = &pixels[y * row_stride..(y + 1) * row_stride];
+                for x in 0..w {
+                    let mut sum = Color::BLACK;
+                    for (i, &k) in kernel.iter().enumerate() {
+                        let dx = i as i32 - r;
+                        let nx = (x + dx).clamp(0, w - 1);
+                        sum = sum + in_row[nx as usize] * k;
+                    }
+                    out_row[x as usize] = sum;
                 }
-                temp[row + x as usize] = sum;
-            }
-        }
+            });
 
+        // Vertical pass — clamp y. Output rows are again independent of
+        // each other (each reads a vertical span of `temp`).
         let mut result = vec![Color::BLACK; pixels.len()];
-        // Vertical pass — clamp y.
-        for y in 0..h {
-            for x in 0..w {
-                let mut sum = Color::BLACK;
-                for (i, &k) in kernel.iter().enumerate() {
-                    let dy = i as i32 - r;
-                    let ny = (y + dy).clamp(0, h - 1);
-                    sum = sum + temp[(ny * w + x) as usize] * k;
+        result
+            .par_chunks_mut(row_stride)
+            .enumerate()
+            .for_each(|(y, out_row)| {
+                let y = y as i32;
+                for x in 0..w {
+                    let mut sum = Color::BLACK;
+                    for (i, &k) in kernel.iter().enumerate() {
+                        let dy = i as i32 - r;
+                        let ny = (y + dy).clamp(0, h - 1);
+                        sum = sum + temp[(ny * w + x) as usize] * k;
+                    }
+                    out_row[x as usize] = sum;
                 }
-                result[(y * w + x) as usize] = sum;
-            }
-        }
+            });
         result
     }
 
     /// Apply ACES tone mapping for better HDR handling
     pub fn apply_aces_tonemapping(&mut self) {
-        for pixel in &mut self.pixels {
-            *pixel = aces_tonemap(*pixel);
-        }
+        self.pixels.par_iter_mut().for_each(|p| *p = aces_tonemap(*p));
     }
 
     /// Apply Reinhard tone mapping
     pub fn apply_reinhard_tonemapping(&mut self) {
-        for pixel in &mut self.pixels {
-            pixel.r = pixel.r / (1.0 + pixel.r);
-            pixel.g = pixel.g / (1.0 + pixel.g);
-            pixel.b = pixel.b / (1.0 + pixel.b);
-        }
+        self.pixels.par_iter_mut().for_each(|p| {
+            p.r = p.r / (1.0 + p.r);
+            p.g = p.g / (1.0 + p.g);
+            p.b = p.b / (1.0 + p.b);
+        });
     }
 
     /// Apply an exposure adjustment in stops: linear scale by 2^ev.
     /// Conventionally applied before tone mapping.
     pub fn apply_exposure(&mut self, ev: f64) {
         let scale = 2.0_f64.powf(ev);
-        for pixel in &mut self.pixels {
-            *pixel = *pixel * scale;
-        }
+        self.pixels.par_iter_mut().for_each(|p| *p = *p * scale);
     }
 
     /// Convert to LDR ImageBuffer with the legacy `pow(1/gamma)` curve.
     /// Prefer `to_image_buffer_srgb` for new code.
     pub fn to_image_buffer(&self, gamma: f64) -> super::ImageBuffer {
-        let mut buffer = super::ImageBuffer::new(self.width, self.height);
-        for y in 0..self.height as usize {
-            for x in 0..self.width as usize {
-                let color = self.get_pixel(x, y);
-                buffer.set_pixel(x, y, color.to_rgb_gamma(gamma));
-            }
-        }
-        buffer
+        let pixels: Vec<[u8; 3]> = self
+            .pixels
+            .par_iter()
+            .map(|c| c.to_rgb_gamma(gamma))
+            .collect();
+        super::ImageBuffer::from_pixels(self.width, self.height, pixels)
     }
 
     /// Convert to LDR using proper sRGB OETF. Assumes pixels are already
     /// tone-mapped into roughly [0,1].
     pub fn to_image_buffer_srgb(&self) -> super::ImageBuffer {
-        let mut buffer = super::ImageBuffer::new(self.width, self.height);
-        for y in 0..self.height as usize {
-            for x in 0..self.width as usize {
-                let color = self.get_pixel(x, y);
-                buffer.set_pixel(x, y, color.to_srgb_u8());
-            }
-        }
-        buffer
+        let pixels: Vec<[u8; 3]> = self
+            .pixels
+            .par_iter()
+            .map(|c| c.to_srgb_u8())
+            .collect();
+        super::ImageBuffer::from_pixels(self.width, self.height, pixels)
     }
+
+    /// Run Intel Open Image Denoise over the HDR color buffer in place.
+    /// Color-only mode (no albedo/normal AOVs). HDR-aware: pass `true`
+    /// for `hdr` so OIDN treats values > 1 as physical radiance rather
+    /// than display-referred. Requires the `denoise` cargo feature.
+    #[cfg(feature = "denoise")]
+    pub fn denoise(&mut self, hdr: bool) {
+        let n = (self.width * self.height) as usize;
+        // OIDN takes interleaved f32 RGB.
+        let mut input: Vec<f32> = Vec::with_capacity(n * 3);
+        for c in &self.pixels {
+            input.push(c.r as f32);
+            input.push(c.g as f32);
+            input.push(c.b as f32);
+        }
+        let mut output: Vec<f32> = vec![0.0; n * 3];
+
+        let device = oidn::Device::new();
+        let mut filter = oidn::RayTracing::new(&device);
+        filter
+            .image_dimensions(self.width as usize, self.height as usize)
+            .hdr(hdr)
+            .clean_aux(false);
+        filter
+            .filter(&input, &mut output)
+            .expect("OIDN filter failed");
+
+        for (i, c) in self.pixels.iter_mut().enumerate() {
+            let base = i * 3;
+            c.r = output[base] as f64;
+            c.g = output[base + 1] as f64;
+            c.b = output[base + 2] as f64;
+        }
+    }
+
+    /// No-op stub when the `denoise` feature is off.
+    #[cfg(not(feature = "denoise"))]
+    pub fn denoise(&mut self, _hdr: bool) {}
 
     /// One-shot finalize: exposure → tone map → sRGB encode.
     /// Does not mutate `self`.
     pub fn finalize(&self, exposure_ev: f64, tonemap: ToneMap) -> super::ImageBuffer {
         let scale = 2.0_f64.powf(exposure_ev);
-        let mut buffer = super::ImageBuffer::new(self.width, self.height);
-        for y in 0..self.height as usize {
-            for x in 0..self.width as usize {
-                let mut c = self.get_pixel(x, y) * scale;
-                c = match tonemap {
+        let pixels: Vec<[u8; 3]> = self
+            .pixels
+            .par_iter()
+            .map(|c| {
+                let c = *c * scale;
+                let c = match tonemap {
                     ToneMap::None => c,
                     ToneMap::Reinhard => Color::new(
                         c.r / (1.0 + c.r),
@@ -202,10 +242,10 @@ impl HdrBuffer {
                     ),
                     ToneMap::Aces => aces_tonemap(c),
                 };
-                buffer.set_pixel(x, y, c.to_srgb_u8());
-            }
-        }
-        buffer
+                c.to_srgb_u8()
+            })
+            .collect();
+        super::ImageBuffer::from_pixels(self.width, self.height, pixels)
     }
 }
 

@@ -11,6 +11,9 @@ description = "Ray tracing library for flat and curved spacetime"
 default = ["flat"]
 flat = []
 curved = ["dep:gr-core", "dep:indicatif"]
+# Intel Open Image Denoise. Requires the OIDN runtime library to be
+# discoverable on the system (see https://www.openimagedenoise.org).
+denoise = ["dep:oidn"]
 
 [dependencies]
 nalgebra.workspace = true
@@ -21,6 +24,7 @@ image.workspace = true
 wide = "0.7"
 gr-core = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
+oidn = { version = "2", optional = true }
 
 [dev-dependencies]
 approx = "0.5"

@@ -71,6 +71,21 @@ fn mis_balance(p_a: f64, p_b: f64) -> f64 {
     if s > 0.0 { p_a / s } else { 0.0 }
 }
 
+/// Clamp a per-sample radiance so its luminance does not exceed `max`.
+/// Scaling (rather than per-channel clamping) preserves chromaticity.
+/// `None` is a no-op; caller-side `Option<f64>` lets us avoid the branch
+/// entirely when the feature is off.
+#[inline]
+fn clamp_firefly(c: Color, max: Option<f64>) -> Color {
+    match max {
+        Some(m) => {
+            let l = c.luminance();
+            if l > m { c * (m / l) } else { c }
+        }
+        None => c,
+    }
+}
+
 /// Encode 2D coordinates to Morton code (Z-order curve)
 #[inline]
 fn morton_encode(x: u32, y: u32) -> u64 {
@@ -108,6 +123,13 @@ pub struct FlatRenderer {
     exposure: f64,
     /// Tone-mapping operator applied when producing an LDR ImageBuffer.
     tonemap: ToneMap,
+    /// Per-sample max luminance. `Some(m)` rescales any sample whose
+    /// luminance exceeds `m` down to `m`, killing fireflies at the cost
+    /// of slight bias on bright caustics.
+    firefly_clamp: Option<f64>,
+    /// Run OIDN on the HDR buffer before exposure/tone mapping.
+    /// Requires the `denoise` cargo feature.
+    denoise: bool,
 }
 
 impl FlatRenderer {
@@ -121,7 +143,24 @@ impl FlatRenderer {
             sampling: SamplingStrategy::Random,
             exposure: 0.0,
             tonemap: ToneMap::Aces,
+            firefly_clamp: None,
+            denoise: false,
         }
+    }
+
+    /// Clamp any per-sample radiance whose luminance exceeds `max` down
+    /// to `max` (preserving chromaticity). Typical values: 5.0–20.0 for
+    /// scenes with small bright sources / caustics. `None` disables.
+    pub fn with_firefly_clamp(mut self, max: f64) -> Self {
+        self.firefly_clamp = Some(max);
+        self
+    }
+
+    /// Run Intel Open Image Denoise on the HDR buffer before tone mapping.
+    /// No-op unless the `denoise` cargo feature is enabled.
+    pub fn with_denoise(mut self, on: bool) -> Self {
+        self.denoise = on;
+        self
     }
 
     /// Set exposure compensation in stops (EV). Applied before tone mapping.
@@ -218,7 +257,8 @@ impl FlatRenderer {
                                     let u = (i as f64 + rng.r#gen::<f64>()) / (width - 1) as f64;
                                     let v = ((height - 1 - j) as f64 + rng.r#gen::<f64>()) / (height - 1) as f64;
                                     let ray = camera.get_ray(u, v);
-                                    color += self.trace_with_rng(ray, scene, self.max_depth, &mut rng);
+                                    let s = self.trace_with_rng(ray, scene, self.max_depth, &mut rng);
+                                    color += clamp_firefly(s, self.firefly_clamp);
                                 }
                             }
                             SamplingStrategy::Stratified => {
@@ -230,7 +270,8 @@ impl FlatRenderer {
                                         let u = (i as f64 + su) / (width - 1) as f64;
                                         let v = ((height - 1 - j) as f64 + sv) / (height - 1) as f64;
                                         let ray = camera.get_ray(u, v);
-                                        color += self.trace_with_rng(ray, scene, self.max_depth, &mut rng);
+                                        let s = self.trace_with_rng(ray, scene, self.max_depth, &mut rng);
+                                        color += clamp_firefly(s, self.firefly_clamp);
                                     }
                                 }
                             }
@@ -247,10 +288,13 @@ impl FlatRenderer {
         self.finalize_tiles(width, height, rendered)
     }
 
-    /// Assemble rendered HDR tiles, then exposure → tone-map → sRGB encode.
+    /// Assemble rendered HDR tiles, then optionally denoise, exposure → tone-map → sRGB encode.
     fn finalize_tiles(&self, width: u32, height: u32, tiles: Vec<(Tile, Vec<Color>)>) -> ImageBuffer {
         let rows = Self::assemble_rows(width, height, tiles);
-        let hdr = HdrBuffer::from_rows(width, height, rows);
+        let mut hdr = HdrBuffer::from_rows(width, height, rows);
+        if self.denoise {
+            hdr.denoise(true);
+        }
         hdr.finalize(self.exposure, self.tonemap)
     }
 
@@ -301,7 +345,8 @@ impl FlatRenderer {
                                 ((height - 1 - j) as f64 + rng.r#gen::<f64>()) / (height - 1) as f64;
 
                             let ray = camera.get_ray(u, v);
-                            color += self.trace_with_rng(ray, scene, self.max_depth, &mut rng);
+                            let s = self.trace_with_rng(ray, scene, self.max_depth, &mut rng);
+                            color += clamp_firefly(s, self.firefly_clamp);
                         }
                         pixels.push(color / self.samples_per_pixel as f64);
                     }
@@ -344,7 +389,8 @@ impl FlatRenderer {
                                 ((height - 1 - j) as f64 + rng.r#gen::<f64>()) / (height - 1) as f64;
 
                             let ray = camera.get_ray(u, v);
-                            color += self.trace_nee(ray, scene, lights, self.max_depth);
+                            let s = self.trace_nee(ray, scene, lights, self.max_depth);
+                            color += clamp_firefly(s, self.firefly_clamp);
                         }
                         pixels.push(color / self.samples_per_pixel as f64);
                     }
@@ -389,7 +435,8 @@ impl FlatRenderer {
                                 ((height - 1 - j) as f64 + rng.r#gen::<f64>()) / (height - 1) as f64;
 
                             let ray = camera.get_ray(u, v);
-                            color += self.trace_nee(ray, scene, lights, self.max_depth);
+                            let s = self.trace_nee(ray, scene, lights, self.max_depth);
+                            color += clamp_firefly(s, self.firefly_clamp);
                         }
                         pixels.push(color / self.samples_per_pixel as f64);
                     }
@@ -446,7 +493,10 @@ impl FlatRenderer {
                             let u = (i as f64 + rng.r#gen::<f64>()) / (width - 1) as f64;
                             let v = ((height - 1 - j) as f64 + rng.r#gen::<f64>()) / (height - 1) as f64;
                             let ray = camera.get_ray(u, v);
-                            let sample = self.trace_with_rng(ray, scene, self.max_depth, rng);
+                            let sample = clamp_firefly(
+                                self.trace_with_rng(ray, scene, self.max_depth, rng),
+                                self.firefly_clamp,
+                            );
                             *sum = *sum + sample;
                             *sum_sq = *sum_sq + sample * sample;
                             let lum = sample.luminance();
@@ -753,6 +803,8 @@ impl Default for FlatRenderer {
             use_morton_order: true,
             exposure: 0.0,
             tonemap: ToneMap::Aces,
+            firefly_clamp: None,
+            denoise: false,
         }
     }
 }

@@ -49,7 +49,6 @@ impl Metric for Schwarzschild {
         let cos_theta = theta.cos();
 
         let rs = self.rs;
-        let f = 1.0 - rs / r;
 
         let mut gamma = [[[0.0; 4]; 4]; 4];
 
@@ -86,6 +85,58 @@ impl Metric for Schwarzschild {
         gamma[3][3][2] = gamma[3][2][3];
 
         gamma
+    }
+
+    /// Direct geodesic RHS bypassing the dense Christoffel tensor.
+    ///
+    /// Schwarzschild has 13 non-zero Γ^μ_αβ entries; the generic path
+    /// (a) zeros a 512-byte `[[[f64;4];4];4]` array and (b) multiplies
+    /// through all 64 components, ~51 of which are multiply-by-zero.
+    /// Profiling showed those costs at ~6.7% (memset) + a chunk of
+    /// `geodesic_acceleration`'s 29%. Inlining the formula here cuts
+    /// both. Equivalent to `-Γ^μ_αβ v^α v^β` for the symbols listed in
+    /// `christoffel` above (factors of 2 absorbed where α ≠ β).
+    fn geodesic_acceleration(
+        &self,
+        pos: &SpacetimePoint,
+        vel: &FourVelocity,
+    ) -> FourVelocity {
+        let r = pos[1].max(1e-10);
+        let theta = pos[2];
+        let sin_theta = theta.sin();
+        let cos_theta = theta.cos();
+
+        let rs = self.rs;
+        let f_denom = r * (r - rs); // 2r(r-rs) / 2 — keep as one product
+        let rmrs = r - rs;
+        let inv_r = 1.0 / r;
+
+        // Γ values (no array storage; only the non-zero ones).
+        let g_t_tr = rs / (2.0 * f_denom);            // Γ^t_tr = Γ^t_rt
+        let g_r_tt = rs * rmrs / (2.0 * r * r * r);   // Γ^r_tt
+        let g_r_rr = -rs / (2.0 * f_denom);           // Γ^r_rr
+        let g_r_thth = -rmrs;                         // Γ^r_θθ
+        let g_r_phph = -rmrs * sin_theta * sin_theta; // Γ^r_φφ
+        // Γ^θ_rθ = Γ^θ_θr = 1/r
+        let g_th_phph = -sin_theta * cos_theta;       // Γ^θ_φφ
+        // Γ^φ_rφ = Γ^φ_φr = 1/r
+        let g_ph_thph = cos_theta / sin_theta;        // Γ^φ_θφ = Γ^φ_φθ
+
+        let vt = vel[0];
+        let vr = vel[1];
+        let vth = vel[2];
+        let vph = vel[3];
+
+        // a^μ = -Σ Γ^μ_αβ v^α v^β. Symmetric pairs (α≠β) get a factor of 2.
+        let acc_t = -2.0 * g_t_tr * vt * vr;
+        let acc_r = -g_r_tt * vt * vt
+            - g_r_rr * vr * vr
+            - g_r_thth * vth * vth
+            - g_r_phph * vph * vph;
+        let acc_th = -2.0 * inv_r * vr * vth - g_th_phph * vph * vph;
+        let acc_ph = -2.0 * inv_r * vr * vph - 2.0 * g_ph_thph * vth * vph;
+
+        Vector4::new(acc_t, acc_r, acc_th, acc_ph)
     }
 
     fn event_horizon(&self) -> Option<f64> {

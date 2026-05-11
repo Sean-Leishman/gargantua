@@ -26,6 +26,31 @@ pub trait Metric: Send + Sync {
         numerical_christoffel(self, pos)
     }
 
+    /// Geodesic equation RHS: `a^μ = -Γ^μ_αβ v^α v^β`.
+    ///
+    /// The default goes through `christoffel`, which is correct for any
+    /// metric but pays for (a) a 512-byte zero of the dense
+    /// `[[[f64;4];4];4]` array and (b) 64 multiplies per evaluation —
+    /// most of which are multiply-by-zero for analytical metrics with
+    /// sparse Christoffels. Concrete metrics should override this and
+    /// inline the non-zero terms directly. Schwarzschild does.
+    fn geodesic_acceleration(
+        &self,
+        pos: &SpacetimePoint,
+        vel: &FourVelocity,
+    ) -> FourVelocity {
+        let gamma = self.christoffel(pos);
+        let mut acc = FourVelocity::zeros();
+        for mu in 0..4 {
+            for alpha in 0..4 {
+                for beta in 0..4 {
+                    acc[mu] -= gamma[mu][alpha][beta] * vel[alpha] * vel[beta];
+                }
+            }
+        }
+        acc
+    }
+
     /// Event horizon radius (if applicable)
     fn event_horizon(&self) -> Option<f64> {
         None

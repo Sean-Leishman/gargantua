@@ -6,7 +6,7 @@
 //! This module implements Runge-Kutta methods for evolving both
 //! position and velocity along geodesics.
 
-use crate::metric::{ChristoffelSymbols, FourVelocity, Metric, SpacetimePoint};
+use crate::metric::{FourVelocity, Metric, SpacetimePoint};
 
 /// State of a particle/photon on a geodesic
 #[derive(Debug, Clone, Copy)]
@@ -42,23 +42,6 @@ pub enum StepResult {
     Singular,
 }
 
-/// Compute the geodesic acceleration d²x^μ/dλ²
-///
-/// From the geodesic equation:
-/// d²x^μ/dλ² = -Γ^μ_αβ (dx^α/dλ)(dx^β/dλ)
-fn geodesic_acceleration(gamma: &ChristoffelSymbols, vel: &FourVelocity) -> FourVelocity {
-    let mut acc = FourVelocity::zeros();
-
-    for mu in 0..4 {
-        for alpha in 0..4 {
-            for beta in 0..4 {
-                acc[mu] -= gamma[mu][alpha][beta] * vel[alpha] * vel[beta];
-            }
-        }
-    }
-
-    acc
-}
 
 /// Fourth-order Runge-Kutta integrator for geodesics
 pub struct RK4Integrator {
@@ -110,9 +93,8 @@ impl RK4Integrator {
         }
 
         // k1
-        let gamma1 = metric.christoffel(&pos);
         let k1_pos = vel;
-        let k1_vel = geodesic_acceleration(&gamma1, &vel);
+        let k1_vel = metric.geodesic_acceleration(&pos, &vel);
 
         // k2
         let pos2 = pos + 0.5 * h * k1_pos;
@@ -120,9 +102,8 @@ impl RK4Integrator {
         if !is_valid_position(&pos2) {
             return StepResult::Singular;
         }
-        let gamma2 = metric.christoffel(&pos2);
         let k2_pos = vel2;
-        let k2_vel = geodesic_acceleration(&gamma2, &vel2);
+        let k2_vel = metric.geodesic_acceleration(&pos2, &vel2);
 
         // k3
         let pos3 = pos + 0.5 * h * k2_pos;
@@ -130,9 +111,8 @@ impl RK4Integrator {
         if !is_valid_position(&pos3) {
             return StepResult::Singular;
         }
-        let gamma3 = metric.christoffel(&pos3);
         let k3_pos = vel3;
-        let k3_vel = geodesic_acceleration(&gamma3, &vel3);
+        let k3_vel = metric.geodesic_acceleration(&pos3, &vel3);
 
         // k4
         let pos4 = pos + h * k3_pos;
@@ -140,9 +120,8 @@ impl RK4Integrator {
         if !is_valid_position(&pos4) {
             return StepResult::Singular;
         }
-        let gamma4 = metric.christoffel(&pos4);
         let k4_pos = vel4;
-        let k4_vel = geodesic_acceleration(&gamma4, &vel4);
+        let k4_vel = metric.geodesic_acceleration(&pos4, &vel4);
 
         // Combine
         state.position = pos + (h / 6.0) * (k1_pos + 2.0 * k2_pos + 2.0 * k3_pos + k4_pos);
@@ -263,8 +242,7 @@ impl RK45Integrator {
         let d7 = 1.0 / 40.0;
 
         // k1
-        let gamma1 = metric.christoffel(&pos);
-        let k1_vel = geodesic_acceleration(&gamma1, &vel);
+        let k1_vel = metric.geodesic_acceleration(&pos, &vel);
 
         // k2
         let pos2 = pos + *h * a2 * vel;
@@ -273,8 +251,7 @@ impl RK45Integrator {
             *h *= 0.5;
             return StepResult::Continue;
         }
-        let gamma2 = metric.christoffel(&pos2);
-        let k2_vel = geodesic_acceleration(&gamma2, &vel2);
+        let k2_vel = metric.geodesic_acceleration(&pos2, &vel2);
 
         // k3
         let pos3 = pos + *h * a3 * vel;
@@ -283,8 +260,7 @@ impl RK45Integrator {
             *h *= 0.5;
             return StepResult::Continue;
         }
-        let gamma3 = metric.christoffel(&pos3);
-        let k3_vel = geodesic_acceleration(&gamma3, &vel3);
+        let k3_vel = metric.geodesic_acceleration(&pos3, &vel3);
 
         // k4
         let pos4 = pos + *h * a4 * vel;
@@ -293,8 +269,7 @@ impl RK45Integrator {
             *h *= 0.5;
             return StepResult::Continue;
         }
-        let gamma4 = metric.christoffel(&pos4);
-        let k4_vel = geodesic_acceleration(&gamma4, &vel4);
+        let k4_vel = metric.geodesic_acceleration(&pos4, &vel4);
 
         // k5
         let pos5 = pos + *h * a5 * vel;
@@ -303,8 +278,7 @@ impl RK45Integrator {
             *h *= 0.5;
             return StepResult::Continue;
         }
-        let gamma5 = metric.christoffel(&pos5);
-        let k5_vel = geodesic_acceleration(&gamma5, &vel5);
+        let k5_vel = metric.geodesic_acceleration(&pos5, &vel5);
 
         // k6
         let pos6 = pos + *h * vel;
@@ -314,15 +288,14 @@ impl RK45Integrator {
             *h *= 0.5;
             return StepResult::Continue;
         }
-        let gamma6 = metric.christoffel(&pos6);
-        let k6_vel = geodesic_acceleration(&gamma6, &vel6);
+        let k6_vel = metric.geodesic_acceleration(&pos6, &vel6);
 
         // 5th order solution
         let new_vel =
             vel + *h * (c1 * k1_vel + c3 * k3_vel + c4 * k4_vel + c5 * k5_vel + c6 * k6_vel);
 
         // 4th order solution for error estimate
-        let k7_vel = geodesic_acceleration(&gamma6, &new_vel);
+        let k7_vel = metric.geodesic_acceleration(&pos6, &new_vel);
         let vel_err = vel
             + *h * (d1 * k1_vel
                 + d3 * k3_vel

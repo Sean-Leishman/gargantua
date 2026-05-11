@@ -115,6 +115,7 @@ pub fn render_with_scene<M: Metric + Sync, S: Hittable + Sync>(
 ) -> RgbImage {
     let integrator = RK45Integrator { max_radius: 200.0, ..RK45Integrator::default() };
     let max_steps = 5000;
+    let observer = camera.position;
     let spa = opts.samples_per_axis.max(1);
     let sub_w = width * spa;
     let sub_h = height * spa;
@@ -144,8 +145,9 @@ pub fn render_with_scene<M: Metric + Sync, S: Hittable + Sync>(
                         let sub_py = py * spa + sy;
                         let mut ray =
                             GeodesicRay::from_camera(metric, camera, sub_px, sub_py, sub_w, sub_h);
-                        let outcome =
-                            trace_ray_with_scene(metric, &mut ray, scene, &integrator, max_steps);
+                        let outcome = trace_ray_with_scene(
+                            metric, &mut ray, scene, &observer, &integrator, max_steps,
+                        );
                         let lin = shade_outcome_linear(&outcome);
                         acc[0] += lin[0];
                         acc[1] += lin[1];

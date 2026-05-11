@@ -17,6 +17,40 @@ fn spherical_to_cartesian(p: &SpacetimePoint) -> Point3 {
     Point3::new(r * st * phi.cos(), r * st * phi.sin(), r * theta.cos())
 }
 
+/// Cartesian `Point3` → spherical `SpacetimePoint` `(0, r, θ, φ)`.
+/// `t` is set to 0 — only the spatial coords feed into stationary metrics.
+#[inline]
+fn cartesian_to_spherical(p: &Point3) -> SpacetimePoint {
+    let r = (p.x * p.x + p.y * p.y + p.z * p.z).sqrt().max(1e-10);
+    let theta = (p.z / r).clamp(-1.0, 1.0).acos();
+    let phi = p.y.atan2(p.x);
+    SpacetimePoint::new(0.0, r, theta, phi)
+}
+
+/// Gravitational-redshift surface-brightness factor `g⁴` for a static
+/// emitter at `pos_emit` observed by a static observer at `pos_obs`.
+/// `g = √(g_tt_emit / g_tt_obs)`, then specific intensity transforms as
+/// `I_obs = I_emit · g⁴` (Liouville's theorem on phase-space density).
+///
+/// For a scene point at smaller r than the camera this is < 1 (light
+/// climbing out of the well loses energy → fainter, redder); at larger
+/// r the photon falls toward the camera and gains energy → slight
+/// blueshift / brightening.
+#[inline]
+fn redshift_g4_static<M: Metric>(
+    metric: &M,
+    pos_emit: &SpacetimePoint,
+    g_tt_obs: f64,
+) -> f64 {
+    let g_tt_emit = -metric.metric_tensor(pos_emit)[(0, 0)];
+    if g_tt_emit <= 0.0 || g_tt_obs <= 0.0 {
+        return 0.0;
+    }
+    let g = (g_tt_emit / g_tt_obs).sqrt();
+    let g2 = g * g;
+    g2 * g2
+}
+
 pub fn trace_ray<M: Metric>(
     metric: &M,
     ray: &mut GeodesicRay,
@@ -174,27 +208,32 @@ pub fn trace_ray_with_scene<M: Metric, S: Hittable>(
     metric: &M,
     ray: &mut GeodesicRay,
     scene: &S,
+    observer: &SpacetimePoint,
     integrator: &RK45Integrator,
     max_steps: usize,
 ) -> RayOutcome {
     let mut h = integrator.initial_step;
+    let g_tt_obs = -metric.metric_tensor(observer)[(0, 0)];
 
     for _ in 0..max_steps {
         let pos_before = ray.state.position;
         let result = integrator.step(metric, &mut ray.state, &mut h);
-        let pos_after = ray.state.position;
 
-        // Test the chord [cart_before, cart_after] against the scene.
         let cart_before = spherical_to_cartesian(&pos_before);
-        let cart_after = spherical_to_cartesian(&pos_after);
+        let cart_after = spherical_to_cartesian(&ray.state.position);
         let segment = cart_after - cart_before;
-        let length = segment.norm();
-        if length > 0.0 {
-            // Direction is non-unit; t in `Hittable::hit` is in segment-length
-            // units, so the valid range is [0, 1] for "anywhere on the chord".
+        if segment.norm() > 0.0 {
             let chord = Ray::new(cart_before, segment);
             if let Some(hit) = scene.hit(&chord, Interval::new(0.0, 1.0)) {
-                return RayOutcome::Scene { color: shade_hit(&chord, &hit) };
+                let lin = shade_hit(&chord, &hit);
+                // Use the cartesian hit point (exact) to compute the
+                // emitter's stationary 4-velocity, then apply g⁴ to the
+                // shaded surface brightness.
+                let pos_emit = cartesian_to_spherical(&hit.point);
+                let g4 = redshift_g4_static(metric, &pos_emit, g_tt_obs);
+                return RayOutcome::Scene {
+                    color: [lin[0] * g4, lin[1] * g4, lin[2] * g4],
+                };
             }
         }
 
@@ -255,12 +294,17 @@ pub fn trace_ray_with_disk_and_scene<M: Metric, S: Hittable>(
             let chord = Ray::new(cart_before, segment);
             if let Some(hit) = scene.hit(&chord, Interval::new(0.0, 1.0)) {
                 let scene_lin = shade_hit(&chord, &hit);
+                // Apply gravitational redshift (g⁴) to the scene surface
+                // brightness before attenuating by accumulated disk
+                // transmission and adding accumulated disk emission.
+                let pos_emit = cartesian_to_spherical(&hit.point);
+                let g4 = redshift_g4_static(metric, &pos_emit, g_tt_obs);
                 let disk_lin = crate::curved::renderer::disk_color(intensity);
                 return RayOutcome::Scene {
                     color: [
-                        scene_lin[0] * transmission + disk_lin[0],
-                        scene_lin[1] * transmission + disk_lin[1],
-                        scene_lin[2] * transmission + disk_lin[2],
+                        scene_lin[0] * g4 * transmission + disk_lin[0],
+                        scene_lin[1] * g4 * transmission + disk_lin[1],
+                        scene_lin[2] * g4 * transmission + disk_lin[2],
                     ],
                 };
             }

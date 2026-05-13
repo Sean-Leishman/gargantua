@@ -63,7 +63,7 @@ fn main() {
         aspect: width as f64 / height as f64,
     };
 
-    let opts = RenderOptions { samples_per_axis: spa, show_progress: false };
+    let opts = RenderOptions { samples_per_axis: spa, show_progress: false, ..Default::default() };
 
     eprintln!(
         "profile_curved: {}x{} spa={} disk={}",

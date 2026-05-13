@@ -3,6 +3,7 @@ use crate::curved::camera::Camera;
 use crate::curved::disk::AccretionDisk;
 use crate::curved::outcome::RayOutcome;
 use crate::curved::ray::GeodesicRay;
+use crate::curved::sky::{DEFAULT_SKY, Sky};
 use crate::curved::tracer::{
     trace_ray, trace_ray_with_disk, trace_ray_with_disk_and_scene, trace_ray_with_scene,
 };
@@ -11,18 +12,22 @@ use image::{Rgb, RgbImage};
 use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
 use nalgebra::Vector3;
 use rayon::prelude::*;
+use std::sync::Arc;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Default)]
 pub struct RenderOptions {
     /// Per-axis supersampling factor (1 = no AA, 2 = 4 spp, 3 = 9 spp, ...).
     pub samples_per_axis: u32,
     /// Show a progress bar over rows.
     pub show_progress: bool,
+    /// Sky / environment lookup for escaped photons. `None` falls back to
+    /// the procedural starfield (`crate::curved::sky::ProceduralSky`).
+    pub sky: Option<Arc<dyn Sky>>,
 }
 
-impl Default for RenderOptions {
-    fn default() -> Self {
-        Self { samples_per_axis: 1, show_progress: false }
+impl RenderOptions {
+    fn sky_ref(&self) -> &dyn Sky {
+        self.sky.as_deref().unwrap_or(&DEFAULT_SKY)
     }
 }
 
@@ -30,10 +35,16 @@ pub fn shade_outcome(outcome: &RayOutcome) -> Rgb<u8> {
     encode_srgb(shade_outcome_linear(outcome))
 }
 
+/// Back-compat: shades with the default procedural sky. New code that
+/// honours a user-supplied environment should call `shade_outcome_with`.
 pub fn shade_outcome_linear(outcome: &RayOutcome) -> [f64; 3] {
+    shade_outcome_with(outcome, &DEFAULT_SKY)
+}
+
+pub fn shade_outcome_with(outcome: &RayOutcome, sky: &dyn Sky) -> [f64; 3] {
     match outcome {
         RayOutcome::Horizon => [0.0, 0.0, 0.0],
-        RayOutcome::Escaped { final_direction } => sky_color(final_direction),
+        RayOutcome::Escaped { final_direction } => sky.sample(final_direction),
         RayOutcome::Disk { intensity, .. } => disk_color(*intensity),
         RayOutcome::Scene { color } => *color,
         // Photon still in flight at step cap — treat as deep sky (no direction available).
@@ -41,20 +52,11 @@ pub fn shade_outcome_linear(outcome: &RayOutcome) -> [f64; 3] {
     }
 }
 
+/// Procedural-sky color for a direction. Kept as a free function for
+/// callers that want to bypass the trait. New code should reach for
+/// `crate::curved::sky::ProceduralSky` instead.
 pub fn sky_color(dir: &Vector3<f64>) -> [f64; 3] {
-    let hash = |x: f64| -> u64 {
-        let bits = x.to_bits();
-        bits.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)
-    };
-    let h = hash(dir[0]) ^ hash(dir[1]).rotate_left(17) ^ hash(dir[2]).rotate_left(34);
-    if h % 512 < 3 {
-        let b = (180 + (h % 75) as u32) as f64 / 255.0;
-        [b, b, b]
-    } else {
-        // Camera "up" is +z, so use the z-component for the horizon→zenith gradient.
-        let v = dir[2].abs() * 15.0 / 255.0;
-        [0.0, 0.0, 10.0 / 255.0 + v]
-    }
+    DEFAULT_SKY.sample(dir)
 }
 
 pub fn disk_color(intensity: f64) -> [f64; 3] {
@@ -120,6 +122,7 @@ pub fn render_with_scene<M: Metric + Sync, S: Hittable + Sync>(
     let sub_w = width * spa;
     let sub_h = height * spa;
     let inv_spp = 1.0 / (spa * spa) as f64;
+    let sky = opts.sky_ref();
 
     let progress = if opts.show_progress {
         let pb = ProgressBar::new(height as u64);
@@ -148,7 +151,7 @@ pub fn render_with_scene<M: Metric + Sync, S: Hittable + Sync>(
                         let outcome = trace_ray_with_scene(
                             metric, &mut ray, scene, &observer, &integrator, max_steps,
                         );
-                        let lin = shade_outcome_linear(&outcome);
+                        let lin = shade_outcome_with(&outcome, sky);
                         acc[0] += lin[0];
                         acc[1] += lin[1];
                         acc[2] += lin[2];
@@ -194,6 +197,7 @@ pub fn render_with_disk_and_scene<M: Metric + Sync, S: Hittable + Sync>(
     let sub_w = width * spa;
     let sub_h = height * spa;
     let inv_spp = 1.0 / (spa * spa) as f64;
+    let sky = opts.sky_ref();
 
     let progress = if opts.show_progress {
         let pb = ProgressBar::new(height as u64);
@@ -222,7 +226,7 @@ pub fn render_with_disk_and_scene<M: Metric + Sync, S: Hittable + Sync>(
                         let outcome = trace_ray_with_disk_and_scene(
                             metric, &mut ray, disk, scene, &observer, &integrator, max_steps,
                         );
-                        let lin = shade_outcome_linear(&outcome);
+                        let lin = shade_outcome_with(&outcome, sky);
                         acc[0] += lin[0];
                         acc[1] += lin[1];
                         acc[2] += lin[2];
@@ -264,6 +268,7 @@ fn render_inner<M: Metric + Sync>(
     let sub_w = width * spa;
     let sub_h = height * spa;
     let inv_spp = 1.0 / (spa * spa) as f64;
+    let sky = opts.sky_ref();
 
     let progress = if opts.show_progress {
         let pb = ProgressBar::new(height as u64);
@@ -282,11 +287,11 @@ fn render_inner<M: Metric + Sync>(
     let rows: Vec<Vec<Rgb<u8>>> = if let Some(pb) = progress.as_ref() {
         row_iter
             .progress_with(pb.clone())
-            .map(|py| render_row(metric, camera, disk, &integrator, &observer, max_steps, py, width, sub_w, sub_h, spa, inv_spp))
+            .map(|py| render_row(metric, camera, disk, &integrator, &observer, max_steps, py, width, sub_w, sub_h, spa, inv_spp, sky))
             .collect()
     } else {
         row_iter
-            .map(|py| render_row(metric, camera, disk, &integrator, &observer, max_steps, py, width, sub_w, sub_h, spa, inv_spp))
+            .map(|py| render_row(metric, camera, disk, &integrator, &observer, max_steps, py, width, sub_w, sub_h, spa, inv_spp, sky))
             .collect()
     };
     if let Some(pb) = progress { pb.finish_and_clear(); }
@@ -314,6 +319,7 @@ fn render_row<M: Metric + Sync>(
     sub_h: u32,
     spa: u32,
     inv_spp: f64,
+    sky: &dyn Sky,
 ) -> Vec<Rgb<u8>> {
     (0..width)
         .map(|px| {
@@ -327,7 +333,7 @@ fn render_row<M: Metric + Sync>(
                         Some(d) => trace_ray_with_disk(metric, &mut ray, d, observer, integrator, max_steps),
                         None => trace_ray(metric, &mut ray, integrator, max_steps),
                     };
-                    let lin = shade_outcome_linear(&outcome);
+                    let lin = shade_outcome_with(&outcome, sky);
                     acc[0] += lin[0];
                     acc[1] += lin[1];
                     acc[2] += lin[2];

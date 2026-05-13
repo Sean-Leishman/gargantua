@@ -75,6 +75,7 @@ fn main() {
     let opts = RenderOptions {
         samples_per_axis: 2, // 4 spp — enough to soften the horizon edge.
         show_progress: true,
+        ..Default::default()
     };
 
     eprintln!("curved_scene: {}x{} spp={}", width, height, opts.samples_per_axis * opts.samples_per_axis);

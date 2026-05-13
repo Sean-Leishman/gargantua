@@ -62,6 +62,15 @@ struct Args {
     #[arg(long)]
     quiet: bool,
 
+    /// Path to an equirectangular HDR environment map (Radiance `.hdr`).
+    /// Replaces the default procedural starfield for escaped photons.
+    #[arg(long)]
+    hdri: Option<String>,
+
+    /// Linear intensity multiplier applied to HDRI samples.
+    #[arg(long, default_value_t = 1.0)]
+    hdri_intensity: f32,
+
     #[arg(long, default_value = "out.png")]
     output: String,
 }
@@ -79,9 +88,20 @@ fn main() {
 
     let t0 = Instant::now();
 
+    let sky = match args.hdri.as_deref() {
+        Some(path) => {
+            let sky = raytracer::curved::HdriSky::from_file(path)
+                .unwrap_or_else(|e| { eprintln!("failed to load HDRI '{path}': {e}"); std::process::exit(1); })
+                .with_intensity(args.hdri_intensity);
+            Some(std::sync::Arc::new(sky) as std::sync::Arc<dyn raytracer::curved::Sky>)
+        }
+        None => None,
+    };
+
     let opts = RenderOptions {
         samples_per_axis: args.samples.max(1),
         show_progress: !args.quiet,
+        sky,
     };
     let disk = AccretionDisk {
         r_inner: args.r_inner,

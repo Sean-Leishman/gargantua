@@ -61,7 +61,7 @@ pub fn trace_ray<M: Metric>(
     for _ in 0..max_steps {
         match integrator.step(metric, &mut ray.state, &mut h) {
             StepResult::Horizon => return RayOutcome::Horizon,
-            StepResult::Escaped => return RayOutcome::Escaped { final_direction: spatial_dir(&ray.state.velocity) },
+            StepResult::Escaped => return RayOutcome::Escaped { final_direction: escape_direction(metric, &ray.state.position, &ray.state.velocity) },
             StepResult::Singular => return RayOutcome::Horizon,
             StepResult::Continue => {}
         }
@@ -137,7 +137,7 @@ pub fn trace_ray_with_disk<M: Metric>(
                 return if intensity > 0.0 {
                     RayOutcome::Disk { intensity, color_temp: disk.temperature_0 }
                 } else {
-                    RayOutcome::Escaped { final_direction: spatial_dir(&ray.state.velocity) }
+                    RayOutcome::Escaped { final_direction: escape_direction(metric, &ray.state.position, &ray.state.velocity) }
                 };
             }
             StepResult::Continue => {}
@@ -182,10 +182,29 @@ fn redshift_factor<M: Metric>(
     if e_emit > 0.0 { e_obs / e_emit } else { 0.0 }
 }
 
-fn spatial_dir(v: &nalgebra::Vector4<f64>) -> Vector3<f64> {
-    let s = Vector3::new(v[1], v[2], v[3]);
-    let n = s.norm();
-    if n > 0.0 { s / n } else { Vector3::new(1.0, 0.0, 0.0) }
+/// Coordinate-basis photon velocity → cartesian unit direction, via the
+/// local orthonormal frame at `pos` (physical components `√g_ii·k^i` on
+/// `r̂/θ̂/φ̂`). The inverse of the projection in `GeodesicRay::from_camera`;
+/// valid for diagonal metrics.
+fn escape_direction<M: Metric>(
+    metric: &M,
+    pos: &SpacetimePoint,
+    v: &nalgebra::Vector4<f64>,
+) -> Vector3<f64> {
+    let g = metric.metric_tensor(pos);
+    let n_r = g[(1, 1)].max(0.0).sqrt() * v[1];
+    let n_t = g[(2, 2)].max(0.0).sqrt() * v[2];
+    let n_p = g[(3, 3)].max(0.0).sqrt() * v[3];
+
+    let (st, ct) = (pos[2].sin(), pos[2].cos());
+    let (sp, cp) = (pos[3].sin(), pos[3].cos());
+    let r_hat = Vector3::new(st * cp, st * sp, ct);
+    let theta_hat = Vector3::new(ct * cp, ct * sp, -st);
+    let phi_hat = Vector3::new(-sp, cp, 0.0);
+
+    let d = n_r * r_hat + n_t * theta_hat + n_p * phi_hat;
+    let n = d.norm();
+    if n > 0.0 { d / n } else { r_hat }
 }
 
 /// Trace a null geodesic against an arbitrary `Hittable` scene living in
@@ -240,7 +259,7 @@ pub fn trace_ray_with_scene<M: Metric, S: Hittable>(
         match result {
             StepResult::Horizon | StepResult::Singular => return RayOutcome::Horizon,
             StepResult::Escaped => {
-                return RayOutcome::Escaped { final_direction: spatial_dir(&ray.state.velocity) };
+                return RayOutcome::Escaped { final_direction: escape_direction(metric, &ray.state.position, &ray.state.velocity) };
             }
             StepResult::Continue => {}
         }
@@ -349,7 +368,7 @@ pub fn trace_ray_with_disk_and_scene<M: Metric, S: Hittable>(
                 return if intensity > 0.0 {
                     RayOutcome::Disk { intensity, color_temp: disk.temperature_0 }
                 } else {
-                    RayOutcome::Escaped { final_direction: spatial_dir(&ray.state.velocity) }
+                    RayOutcome::Escaped { final_direction: escape_direction(metric, &ray.state.position, &ray.state.velocity) }
                 };
             }
             StepResult::Continue => {}
@@ -381,5 +400,38 @@ fn shade_hit(ray: &Ray, hit: &crate::core::HitRecord) -> [f64; 3] {
     let facing = 0.5 + 0.5 * nd;
     let lit = albedo * facing + emission;
     [lit.r, lit.g, lit.b]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gr_core::Schwarzschild;
+
+    #[test]
+    fn escape_direction_inverts_camera_projection() {
+        // Build a coordinate-basis velocity from a known cartesian direction
+        // exactly the way GeodesicRay::from_camera does, then check
+        // escape_direction recovers that direction.
+        let metric = Schwarzschild::new(1.0);
+        let pos = SpacetimePoint::new(0.0, 150.0, 1.1, 2.3);
+        let dir = Vector3::new(0.3, -0.5, 0.8).normalize();
+
+        let (st, ct) = (pos[2].sin(), pos[2].cos());
+        let (sp, cp) = (pos[3].sin(), pos[3].cos());
+        let r_hat = Vector3::new(st * cp, st * sp, ct);
+        let theta_hat = Vector3::new(ct * cp, ct * sp, -st);
+        let phi_hat = Vector3::new(-sp, cp, 0.0);
+
+        let g = metric.metric_tensor(&pos);
+        let v = nalgebra::Vector4::new(
+            1.0,
+            dir.dot(&r_hat) / g[(1, 1)].sqrt(),
+            dir.dot(&theta_hat) / g[(2, 2)].sqrt(),
+            dir.dot(&phi_hat) / g[(3, 3)].sqrt(),
+        );
+
+        let out = escape_direction(&metric, &pos, &v);
+        assert!((out - dir).norm() < 1e-12, "got {out:?}, want {dir:?}");
+    }
 }
 

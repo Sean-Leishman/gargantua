@@ -207,11 +207,6 @@ impl RK45Integrator {
         }
 
         // Dormand-Prince coefficients
-        let a2 = 1.0 / 5.0;
-        let a3 = 3.0 / 10.0;
-        let a4 = 4.0 / 5.0;
-        let a5 = 8.0 / 9.0;
-
         let b21 = 1.0 / 5.0;
         let b31 = 3.0 / 40.0;
         let b32 = 9.0 / 40.0;
@@ -244,8 +239,12 @@ impl RK45Integrator {
         // k1
         let k1_vel = metric.geodesic_acceleration(&pos, &vel);
 
+        // Stage positions are integrated with the same Butcher tableau as
+        // the velocities: the position component of k_i is the stage
+        // velocity vel_i, so pos_i = pos + h·Σ b_ij·vel_j.
+
         // k2
-        let pos2 = pos + *h * a2 * vel;
+        let pos2 = pos + *h * b21 * vel;
         let vel2 = vel + *h * b21 * k1_vel;
         if !is_valid_position(&pos2) {
             *h *= 0.5;
@@ -254,7 +253,7 @@ impl RK45Integrator {
         let k2_vel = metric.geodesic_acceleration(&pos2, &vel2);
 
         // k3
-        let pos3 = pos + *h * a3 * vel;
+        let pos3 = pos + *h * (b31 * vel + b32 * vel2);
         let vel3 = vel + *h * (b31 * k1_vel + b32 * k2_vel);
         if !is_valid_position(&pos3) {
             *h *= 0.5;
@@ -263,7 +262,7 @@ impl RK45Integrator {
         let k3_vel = metric.geodesic_acceleration(&pos3, &vel3);
 
         // k4
-        let pos4 = pos + *h * a4 * vel;
+        let pos4 = pos + *h * (b41 * vel + b42 * vel2 + b43 * vel3);
         let vel4 = vel + *h * (b41 * k1_vel + b42 * k2_vel + b43 * k3_vel);
         if !is_valid_position(&pos4) {
             *h *= 0.5;
@@ -272,7 +271,7 @@ impl RK45Integrator {
         let k4_vel = metric.geodesic_acceleration(&pos4, &vel4);
 
         // k5
-        let pos5 = pos + *h * a5 * vel;
+        let pos5 = pos + *h * (b51 * vel + b52 * vel2 + b53 * vel3 + b54 * vel4);
         let vel5 = vel + *h * (b51 * k1_vel + b52 * k2_vel + b53 * k3_vel + b54 * k4_vel);
         if !is_valid_position(&pos5) {
             *h *= 0.5;
@@ -281,7 +280,7 @@ impl RK45Integrator {
         let k5_vel = metric.geodesic_acceleration(&pos5, &vel5);
 
         // k6
-        let pos6 = pos + *h * vel;
+        let pos6 = pos + *h * (b61 * vel + b62 * vel2 + b63 * vel3 + b64 * vel4 + b65 * vel5);
         let vel6 =
             vel + *h * (b61 * k1_vel + b62 * k2_vel + b63 * k3_vel + b64 * k4_vel + b65 * k5_vel);
         if !is_valid_position(&pos6) {
@@ -291,11 +290,20 @@ impl RK45Integrator {
         let k6_vel = metric.geodesic_acceleration(&pos6, &vel6);
 
         // 5th order solution
+        let new_pos = pos + *h * (c1 * vel + c3 * vel3 + c4 * vel4 + c5 * vel5 + c6 * vel6);
         let new_vel =
             vel + *h * (c1 * k1_vel + c3 * k3_vel + c4 * k4_vel + c5 * k5_vel + c6 * k6_vel);
+        if !is_valid_position(&new_pos) {
+            *h *= 0.5;
+            return StepResult::Continue;
+        }
 
-        // 4th order solution for error estimate
-        let k7_vel = metric.geodesic_acceleration(&pos6, &new_vel);
+        // 4th order solution for error estimate. k7 is evaluated at the
+        // 5th-order solution (Dormand-Prince); its position component is
+        // new_vel.
+        let k7_vel = metric.geodesic_acceleration(&new_pos, &new_vel);
+        let pos_err = pos
+            + *h * (d1 * vel + d3 * vel3 + d4 * vel4 + d5 * vel5 + d6 * vel6 + d7 * new_vel);
         let vel_err = vel
             + *h * (d1 * k1_vel
                 + d3 * k3_vel
@@ -304,12 +312,13 @@ impl RK45Integrator {
                 + d6 * k6_vel
                 + d7 * k7_vel);
 
-        // Error estimate
-        let err = (new_vel - vel_err).norm();
+        // Error estimate over the full state (position + velocity)
+        let err =
+            ((new_pos - pos_err).norm_squared() + (new_vel - vel_err).norm_squared()).sqrt();
 
         if err < self.tolerance || *h <= self.min_step {
             // Accept step
-            state.position = pos + *h * vel;
+            state.position = new_pos;
             state.velocity = new_vel;
             state.lambda += *h;
             normalize_spherical_coords(&mut state.position);
@@ -382,6 +391,37 @@ mod tests {
         // Radius should remain approximately constant
         assert!(
             (state.position[1] - r).abs() < 0.1,
+            "Radius drifted: {} -> {}",
+            r,
+            state.position[1]
+        );
+    }
+
+    #[test]
+    fn test_rk45_circular_orbit() {
+        // Same circular orbit as the RK4 test, integrated adaptively. With
+        // position staged at full order the radius holds far tighter than
+        // the RK4 fixed-step run.
+        let metric = Schwarzschild::new(1.0);
+        let r = 6.0;
+        let omega = (1.0_f64 / (r * r * r)).sqrt();
+        let mut state = GeodesicState::new(
+            SpacetimePoint::new(0.0, r, PI / 2.0, 0.0),
+            FourVelocity::new(1.0, 0.0, 0.0, omega),
+        );
+
+        let integrator = RK45Integrator::default();
+        let mut h = integrator.initial_step;
+        let period = 2.0 * PI / omega;
+        for _ in 0..1_000_000 {
+            if state.lambda >= period {
+                break;
+            }
+            assert_eq!(integrator.step(&metric, &mut state, &mut h), StepResult::Continue);
+        }
+        assert!(state.lambda >= period, "integration stalled at λ = {}", state.lambda);
+        assert!(
+            (state.position[1] - r).abs() < 1e-3,
             "Radius drifted: {} -> {}",
             r,
             state.position[1]

@@ -4,9 +4,7 @@ use crate::curved::disk::AccretionDisk;
 use crate::curved::outcome::RayOutcome;
 use crate::curved::ray::GeodesicRay;
 use crate::curved::sky::{DEFAULT_SKY, Sky};
-use crate::curved::tracer::{
-    trace_ray, trace_ray_with_disk, trace_ray_with_disk_and_scene, trace_ray_with_scene,
-};
+use crate::curved::tracer::trace_core;
 use gr_core::{Metric, RK45Integrator};
 use image::{Rgb, RgbImage};
 use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
@@ -86,7 +84,7 @@ pub fn render<M: Metric + Sync>(
     height: u32,
     opts: RenderOptions,
 ) -> RgbImage {
-    render_inner(metric, camera, None, width, height, opts)
+    render_inner(metric, camera, None, None, width, height, opts)
 }
 
 pub fn render_with_disk<M: Metric + Sync>(
@@ -97,7 +95,7 @@ pub fn render_with_disk<M: Metric + Sync>(
     height: u32,
     opts: RenderOptions,
 ) -> RgbImage {
-    render_inner(metric, camera, Some(disk), width, height, opts)
+    render_inner(metric, camera, Some(disk), None, width, height, opts)
 }
 
 /// Render a curved-space scene where geodesics test against arbitrary
@@ -115,72 +113,12 @@ pub fn render_with_scene<M: Metric + Sync, S: Hittable + Sync>(
     height: u32,
     opts: RenderOptions,
 ) -> RgbImage {
-    let integrator = RK45Integrator { max_radius: 200.0, ..RK45Integrator::default() };
-    let max_steps = 5000;
-    let observer = camera.position;
-    let spa = opts.samples_per_axis.max(1);
-    let sub_w = width * spa;
-    let sub_h = height * spa;
-    let inv_spp = 1.0 / (spa * spa) as f64;
-    let sky = opts.sky_ref();
-
-    let progress = if opts.show_progress {
-        let pb = ProgressBar::new(height as u64);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner} rows {pos}/{len} [{elapsed_precise}] [{wide_bar}] eta {eta}",
-            )
-            .unwrap(),
-        );
-        Some(pb)
-    } else {
-        None
-    };
-
-    let row_iter = (0..height).into_par_iter();
-    let render_one_row = |py: u32| -> Vec<Rgb<u8>> {
-        (0..width)
-            .map(|px| {
-                let mut acc = [0.0_f64; 3];
-                for sy in 0..spa {
-                    for sx in 0..spa {
-                        let sub_px = px * spa + sx;
-                        let sub_py = py * spa + sy;
-                        let mut ray =
-                            GeodesicRay::from_camera(metric, camera, sub_px, sub_py, sub_w, sub_h);
-                        let outcome = trace_ray_with_scene(
-                            metric, &mut ray, scene, &observer, &integrator, max_steps,
-                        );
-                        let lin = shade_outcome_with(&outcome, sky);
-                        acc[0] += lin[0];
-                        acc[1] += lin[1];
-                        acc[2] += lin[2];
-                    }
-                }
-                encode_srgb([acc[0] * inv_spp, acc[1] * inv_spp, acc[2] * inv_spp])
-            })
-            .collect()
-    };
-
-    let rows: Vec<Vec<Rgb<u8>>> = if let Some(pb) = progress.as_ref() {
-        row_iter.progress_with(pb.clone()).map(render_one_row).collect()
-    } else {
-        row_iter.map(render_one_row).collect()
-    };
-    if let Some(pb) = progress { pb.finish_and_clear(); }
-
-    let mut img = RgbImage::new(width, height);
-    for (py, row) in rows.into_iter().enumerate() {
-        for (px, color) in row.into_iter().enumerate() {
-            img.put_pixel(px as u32, py as u32, color);
-        }
-    }
-    img
+    render_inner(metric, camera, None, Some(scene), width, height, opts)
 }
 
 /// Render a curved-space scene composed of *both* a volumetric accretion
-/// disk and `Hittable` geometry. See `trace_ray_with_disk_and_scene` for
-/// the per-step composition.
+/// disk and `Hittable` geometry. See `trace_core` for the per-step
+/// composition.
 pub fn render_with_disk_and_scene<M: Metric + Sync, S: Hittable + Sync>(
     metric: &M,
     camera: &Camera,
@@ -190,73 +128,14 @@ pub fn render_with_disk_and_scene<M: Metric + Sync, S: Hittable + Sync>(
     height: u32,
     opts: RenderOptions,
 ) -> RgbImage {
-    let integrator = RK45Integrator { max_radius: 200.0, ..RK45Integrator::default() };
-    let max_steps = 5000;
-    let observer = camera.position;
-    let spa = opts.samples_per_axis.max(1);
-    let sub_w = width * spa;
-    let sub_h = height * spa;
-    let inv_spp = 1.0 / (spa * spa) as f64;
-    let sky = opts.sky_ref();
-
-    let progress = if opts.show_progress {
-        let pb = ProgressBar::new(height as u64);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner} rows {pos}/{len} [{elapsed_precise}] [{wide_bar}] eta {eta}",
-            )
-            .unwrap(),
-        );
-        Some(pb)
-    } else {
-        None
-    };
-
-    let row_iter = (0..height).into_par_iter();
-    let render_one_row = |py: u32| -> Vec<Rgb<u8>> {
-        (0..width)
-            .map(|px| {
-                let mut acc = [0.0_f64; 3];
-                for sy in 0..spa {
-                    for sx in 0..spa {
-                        let sub_px = px * spa + sx;
-                        let sub_py = py * spa + sy;
-                        let mut ray =
-                            GeodesicRay::from_camera(metric, camera, sub_px, sub_py, sub_w, sub_h);
-                        let outcome = trace_ray_with_disk_and_scene(
-                            metric, &mut ray, disk, scene, &observer, &integrator, max_steps,
-                        );
-                        let lin = shade_outcome_with(&outcome, sky);
-                        acc[0] += lin[0];
-                        acc[1] += lin[1];
-                        acc[2] += lin[2];
-                    }
-                }
-                encode_srgb([acc[0] * inv_spp, acc[1] * inv_spp, acc[2] * inv_spp])
-            })
-            .collect()
-    };
-
-    let rows: Vec<Vec<Rgb<u8>>> = if let Some(pb) = progress.as_ref() {
-        row_iter.progress_with(pb.clone()).map(render_one_row).collect()
-    } else {
-        row_iter.map(render_one_row).collect()
-    };
-    if let Some(pb) = progress { pb.finish_and_clear(); }
-
-    let mut img = RgbImage::new(width, height);
-    for (py, row) in rows.into_iter().enumerate() {
-        for (px, color) in row.into_iter().enumerate() {
-            img.put_pixel(px as u32, py as u32, color);
-        }
-    }
-    img
+    render_inner(metric, camera, Some(disk), Some(scene), width, height, opts)
 }
 
 fn render_inner<M: Metric + Sync>(
     metric: &M,
     camera: &Camera,
     disk: Option<&AccretionDisk>,
+    scene: Option<&(dyn Hittable + Sync)>,
     width: u32,
     height: u32,
     opts: RenderOptions,
@@ -283,16 +162,41 @@ fn render_inner<M: Metric + Sync>(
         None
     };
 
+    let render_one_row = |py: u32| -> Vec<Rgb<u8>> {
+        (0..width)
+            .map(|px| {
+                let mut acc = [0.0_f64; 3];
+                for sy in 0..spa {
+                    for sx in 0..spa {
+                        let sub_px = px * spa + sx;
+                        let sub_py = py * spa + sy;
+                        let mut ray =
+                            GeodesicRay::from_camera(metric, camera, sub_px, sub_py, sub_w, sub_h);
+                        let outcome = trace_core(
+                            metric,
+                            &mut ray,
+                            disk,
+                            scene.map(|s| s as &dyn Hittable),
+                            &observer,
+                            &integrator,
+                            max_steps,
+                        );
+                        let lin = shade_outcome_with(&outcome, sky);
+                        acc[0] += lin[0];
+                        acc[1] += lin[1];
+                        acc[2] += lin[2];
+                    }
+                }
+                encode_srgb([acc[0] * inv_spp, acc[1] * inv_spp, acc[2] * inv_spp])
+            })
+            .collect()
+    };
+
     let row_iter = (0..height).into_par_iter();
     let rows: Vec<Vec<Rgb<u8>>> = if let Some(pb) = progress.as_ref() {
-        row_iter
-            .progress_with(pb.clone())
-            .map(|py| render_row(metric, camera, disk, &integrator, &observer, max_steps, py, width, sub_w, sub_h, spa, inv_spp, sky))
-            .collect()
+        row_iter.progress_with(pb.clone()).map(render_one_row).collect()
     } else {
-        row_iter
-            .map(|py| render_row(metric, camera, disk, &integrator, &observer, max_steps, py, width, sub_w, sub_h, spa, inv_spp, sky))
-            .collect()
+        row_iter.map(render_one_row).collect()
     };
     if let Some(pb) = progress { pb.finish_and_clear(); }
 
@@ -303,45 +207,6 @@ fn render_inner<M: Metric + Sync>(
         }
     }
     img
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_row<M: Metric + Sync>(
-    metric: &M,
-    camera: &Camera,
-    disk: Option<&AccretionDisk>,
-    integrator: &RK45Integrator,
-    observer: &gr_core::SpacetimePoint,
-    max_steps: usize,
-    py: u32,
-    width: u32,
-    sub_w: u32,
-    sub_h: u32,
-    spa: u32,
-    inv_spp: f64,
-    sky: &dyn Sky,
-) -> Vec<Rgb<u8>> {
-    (0..width)
-        .map(|px| {
-            let mut acc = [0.0_f64; 3];
-            for sy in 0..spa {
-                for sx in 0..spa {
-                    let sub_px = px * spa + sx;
-                    let sub_py = py * spa + sy;
-                    let mut ray = GeodesicRay::from_camera(metric, camera, sub_px, sub_py, sub_w, sub_h);
-                    let outcome = match disk {
-                        Some(d) => trace_ray_with_disk(metric, &mut ray, d, observer, integrator, max_steps),
-                        None => trace_ray(metric, &mut ray, integrator, max_steps),
-                    };
-                    let lin = shade_outcome_with(&outcome, sky);
-                    acc[0] += lin[0];
-                    acc[1] += lin[1];
-                    acc[2] += lin[2];
-                }
-            }
-            encode_srgb([acc[0] * inv_spp, acc[1] * inv_spp, acc[2] * inv_spp])
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -390,4 +255,3 @@ mod tests {
         assert!(red_pixels > 5, "expected curved renderer to hit the sphere on at least a few pixels (got {})", red_pixels);
     }
 }
-
